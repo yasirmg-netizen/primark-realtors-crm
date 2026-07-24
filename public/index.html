@@ -122,6 +122,7 @@ let state = {
   users: [],
   campaigns: [],
   campaignsLoaded: false,
+  teamRoster: [],
   loading: true,
 };
 
@@ -181,6 +182,9 @@ async function loadLeads() {
   state.leads = data.leads;
   render();
   try { const c = await api("/campaigns"); state.campaigns = c.campaigns; } catch (e) {}
+  if (state.user && (state.user.role === "admin" || state.user.role === "super_admin")) {
+    try { const u = await api("/users"); state.teamRoster = u.users.filter((x) => x.active); } catch (e) {}
+  }
 }
 
 async function login(username, password) {
@@ -277,7 +281,9 @@ function leadRow(l, canReassign) {
     <td>${esc(l.source)}${l.campaign ? `<div style="font-size:11px;color:var(--muted)">${esc(l.campaign)}</div>` : ""}</td>
     <td><span class="badge" style="background:${STATUS_STYLE[l.status].bg};color:${STATUS_STYLE[l.status].text};">${esc(l.status)}</span>
       ${l.status === "Disqualified" && l.disqualify_reason ? `<div style="font-size:11px;color:var(--muted);margin-top:3px;">${esc(l.disqualify_reason)}</div>` : ""}</td>
-    <td>${esc(l.assigned_to_name || "\u2014")}</td>
+    <td>${canReassign ? `<select style="width:auto;min-width:130px;padding:5px 8px;font-size:12px;" onchange="reassignLead('${l.id}', this.value)">
+      ${state.teamRoster.map((u) => `<option value="${u.id}" ${l.assigned_to === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
+    </select>` : esc(l.assigned_to_name || "\u2014")}</td>
     <td class="${overdue ? "overdue" : ""}">${fmtDate(l.follow_up_date)}</td>
     <td style="color:var(--muted)">${fmtDateTime(l.created_at)}</td>
     <td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td>
@@ -419,7 +425,7 @@ function leadsTab(filtered) {
     </div>
     <div class="card table-scroll" style="padding:0;">
       <table class="leads-table"><thead><tr><th>Client</th><th>Contact</th><th>Source</th><th>Status</th><th>Assigned</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
-      <tbody>${filtered.map((l) => leadRow(l)).join("") || `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
+      <tbody>${filtered.map((l) => leadRow(l, state.user.role === "admin" || state.user.role === "super_admin")).join("") || `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
     </div>
   `;
 }
@@ -510,7 +516,8 @@ async function submitAddLead() {
 function importTab() {
   return `
     <h1 class="page-title">Import leads from CSV</h1>
-    <p class="page-sub">Columns recognized: Name, Phone, Email, Source, Campaign, Deal Value</p>
+    <p class="page-sub">Name is the only required column. Everything else is optional - download the template below for the full list.</p>
+    <button class="ghost" style="margin-bottom:16px;" onclick="downloadCsvTemplate()">\u2B07 Download CSV template</button>
     <div class="dropzone" onclick="document.getElementById('csvfile').click()">Click to choose a .csv file</div>
     <input id="csvfile" type="file" accept=".csv" style="display:none" onchange="handleCsv(this.files[0])" />
     <div id="csvPreview"></div>
@@ -529,6 +536,19 @@ function csvParse(text) {
 }
 
 let pendingCsvRows = [];
+function downloadCsvTemplate() {
+  const headers = ["Name", "Phone", "Email", "Source", "Campaign", "Lead Type", "Property/Project", "Configuration",
+    "Budget Min", "Budget Max", "Preferred Location", "Channel Partner", "Deal Value", "Follow-up Date", "Assigned To"];
+  const example = ["Priya Nandakumar", "9845012345", "priya.n@example.com", "Instagram", "Diwali Offer 2026", "Buyer",
+    "Palm Meadows Phase 2", "3BHK", "4000000", "5000000", "Whitefield", "", "4500000", "2026-08-15", "Aditi Rao"];
+  const csvEscape = (v) => /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  const csv = [headers.map(csvEscape).join(","), example.map(csvEscape).join(",")].join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = "primark-realtors-lead-import-template.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
+
 function handleCsv(file) {
   if (!file) return;
   const reader = new FileReader();
@@ -562,6 +582,15 @@ async function confirmCsvImport() {
     name: get(r, ["name", "client name"]) || "Unnamed lead", phone: get(r, ["phone", "contact number", "contact"]),
     email: get(r, ["email", "email id"]), source: SOURCES.includes(get(r, ["source", "source of lead"])) ? get(r, ["source", "source of lead"]) : "Other",
     campaign: get(r, ["campaign", "campaign name"]),
+    lead_type: LEAD_TYPES.includes(get(r, ["lead type", "leadtype"])) ? get(r, ["lead type", "leadtype"]) : "Buyer",
+    property_interest: get(r, ["property", "property/project", "project", "property / project"]),
+    configuration: CONFIGURATIONS.includes(get(r, ["configuration", "config"])) ? get(r, ["configuration", "config"]) : "",
+    budget_min: get(r, ["budget min", "budgetmin", "budget min (\u20b9)"]),
+    budget_max: get(r, ["budget max", "budgetmax", "budget max (\u20b9)"]),
+    preferred_location: get(r, ["preferred location", "location"]),
+    channel_partner: get(r, ["channel partner", "broker", "channel partner / broker"]),
+    follow_up_date: get(r, ["follow-up date", "followup date", "follow up date"]),
+    assigned_to: get(r, ["assigned to", "assignedto", "rep"]),
     deal_value: Number(get(r, ["dealvalue", "deal value", "value"])) || 0,
   }));
   try { const res = await api("/leads/import", { method: "POST", body: JSON.stringify({ rows }) }); showToast("Imported " + res.imported + " leads"); state.tab = "leads"; await loadLeads(); }
@@ -736,12 +765,20 @@ function drawerHTML(l) {
           </div>
         </div>
         ${l.status === "Disqualified" ? `<div class="field-row"><label>Reason</label><select onchange="updateLead('${l.id}', {disqualify_reason:this.value})">${DISQUALIFY_REASONS.map((r) => `<option ${l.disqualify_reason === r ? "selected" : ""}>${r}</option>`).join("")}</select></div>` : ""}
+        ${(state.user.role === "admin" || state.user.role === "super_admin") ? `
+        <div class="field-row"><label>Assigned to</label><select onchange="reassignLead('${l.id}', this.value)">
+          ${state.teamRoster.map((u) => `<option value="${u.id}" ${l.assigned_to === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}
+        </select></div>` : ""}
         <div class="two-col">
           <div class="field-row"><label>Lead type</label><select onchange="updateLead('${l.id}', {lead_type:this.value})">${LEAD_TYPES.map((s) => `<option ${l.lead_type === s ? "selected" : ""}>${s}</option>`).join("")}</select></div>
           <div class="field-row"><label>Configuration</label><select onchange="updateLead('${l.id}', {configuration:this.value})">${CONFIGURATIONS.map((c) => `<option ${l.configuration === c ? "selected" : ""}>${c}</option>`).join("")}</select></div>
         </div>
         <div class="two-col">
           <div class="field-row"><label>Property / project</label><input value="${esc(l.property_interest || "")}" onchange="updateLead('${l.id}', {property_interest:this.value})" /></div>
+          <div class="field-row"><label>Preferred location</label><input value="${esc(l.preferred_location || "")}" onchange="updateLead('${l.id}', {preferred_location:this.value})" /></div>
+        </div>
+        <div class="two-col">
+          <div class="field-row"><label>Channel partner / broker</label><input value="${esc(l.channel_partner || "")}" placeholder="Optional" onchange="updateLead('${l.id}', {channel_partner:this.value})" /></div>
         </div>
         <div class="two-col">
           <div class="field-row"><label>Budget min (\u20B9)</label><input type="number" value="${l.budget_min || ""}" onchange="updateLead('${l.id}', {budget_min:this.value})" /></div>
@@ -775,6 +812,14 @@ function drawerHTML(l) {
 async function updateLead(id, patch) {
   try { await api("/leads/" + id, { method: "PATCH", body: JSON.stringify(patch) }); await loadLeads(); }
   catch (e) { showToast(e.message); }
+}
+async function reassignLead(id, newUserId) {
+  const user = state.teamRoster.find((u) => String(u.id) === String(newUserId));
+  try {
+    await api("/leads/" + id, { method: "PATCH", body: JSON.stringify({ assigned_to: Number(newUserId) }) });
+    showToast(user ? "Reassigned to " + user.name : "Reassigned");
+    await loadLeads();
+  } catch (e) { showToast(e.message); }
 }
 async function submitComment(id) {
   const text = document.getElementById("commentBox").value.trim();
@@ -825,8 +870,8 @@ function closeLead() { state.selectedId = null; render(); }
 
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout;
-window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate;
-window.updateLead = updateLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
+window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate;
+window.updateLead = updateLead; window.reassignLead = reassignLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
 window.createUser = createUser; window.resetPassword = resetPassword; window.toggleActive = toggleActive; window.editUsername = editUsername; window.downloadAllLeads = downloadAllLeads; window.changeOwnPassword = changeOwnPassword;
 
 boot();
