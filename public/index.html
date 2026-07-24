@@ -125,6 +125,7 @@ let state = {
   teamRoster: [],
   deletionLog: [],
   deletionLogLoaded: false,
+  selectedLeadIds: new Set(),
   loading: true,
 };
 
@@ -271,9 +272,10 @@ function bars(data, labelKey, valueKey, color) {
     </div>`).join("");
 }
 
-function leadRow(l, canReassign) {
+function leadRow(l, canReassign, showCheckbox) {
   const overdue = l.follow_up_date && new Date(l.follow_up_date) < state.stats.startOfToday && !CLOSED_STATUSES.includes(l.status);
   return `<tr>
+    ${showCheckbox ? `<td><input type="checkbox" style="width:auto;" ${state.selectedLeadIds.has(l.id) ? "checked" : ""} onchange="toggleLeadSelection('${l.id}', this.checked)" /></td>` : ""}
     <td>${esc(l.name)}${l.property_interest ? `<div style="font-size:11px;color:var(--muted)">${esc(l.property_interest)}</div>` : ""}</td>
     <td>
       ${l.phone ? callBtnHTML(l.phone) + waBtnHTML(l.phone) : "\u2014"}
@@ -418,6 +420,9 @@ function myDayTab() {
 }
 
 function leadsTab(filtered) {
+  const isSuperAdmin = state.user.role === "super_admin";
+  const selectedCount = state.selectedLeadIds.size;
+  const allVisibleSelected = isSuperAdmin && filtered.length > 0 && filtered.every((l) => state.selectedLeadIds.has(l.id));
   return `
     <h1 class="page-title">Leads</h1>
     <p class="page-sub">${filtered.length} of ${state.leads.length} leads shown</p>
@@ -425,9 +430,19 @@ function leadsTab(filtered) {
       <select onchange="setFilter('source', this.value)"><option>All</option>${SOURCES.map((s) => `<option ${state.filters.source === s ? "selected" : ""}>${s}</option>`).join("")}</select>
       <select onchange="setFilter('status', this.value)"><option>All</option>${STATUSES.map((s) => `<option ${state.filters.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
     </div>
+    ${isSuperAdmin && selectedCount > 0 ? `
+    <div class="card" style="padding:12px 16px;margin-bottom:12px;background:#3A1F22;border:1px solid var(--danger);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div style="font-size:13.5px;color:#F08484;">${selectedCount} lead${selectedCount === 1 ? "" : "s"} selected</div>
+      <div style="display:flex;gap:8px;">
+        <button class="ghost" onclick="clearLeadSelection()">Clear selection</button>
+        <button class="danger" onclick="bulkDeleteSelected()">Delete selected (${selectedCount})</button>
+      </div>
+    </div>` : ""}
     <div class="card table-scroll" style="padding:0;">
-      <table class="leads-table"><thead><tr><th>Client</th><th>Contact</th><th>Source</th><th>Status</th><th>Assigned</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
-      <tbody>${filtered.map((l) => leadRow(l, state.user.role === "admin" || state.user.role === "super_admin")).join("") || `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
+      <table class="leads-table"><thead><tr>
+        ${isSuperAdmin ? `<th><input type="checkbox" style="width:auto;" ${allVisibleSelected ? "checked" : ""} onchange="toggleSelectAllLeads(this.checked)" /></th>` : ""}
+        <th>Client</th><th>Contact</th><th>Source</th><th>Status</th><th>Assigned</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
+      <tbody>${filtered.map((l) => leadRow(l, state.user.role === "admin" || state.user.role === "super_admin", isSuperAdmin)).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
     </div>
   `;
 }
@@ -905,6 +920,34 @@ async function deleteLead(id, name) {
     await loadLeads();
   } catch (e) { showToast(e.message); }
 }
+function toggleLeadSelection(id, checked) {
+  if (checked) state.selectedLeadIds.add(id); else state.selectedLeadIds.delete(id);
+  render();
+}
+function toggleSelectAllLeads(checked) {
+  const filtered = state.leads.filter((l) => {
+    if (state.filters.source !== "All" && l.source !== state.filters.source) return false;
+    if (state.filters.status !== "All" && l.status !== state.filters.status) return false;
+    if (state.filters.search) { const s = state.filters.search.toLowerCase(); if (!(`${l.name} ${l.phone} ${l.email}`.toLowerCase().includes(s))) return false; }
+    return true;
+  });
+  if (checked) filtered.forEach((l) => state.selectedLeadIds.add(l.id));
+  else filtered.forEach((l) => state.selectedLeadIds.delete(l.id));
+  render();
+}
+function clearLeadSelection() { state.selectedLeadIds.clear(); render(); }
+async function bulkDeleteSelected() {
+  const ids = Array.from(state.selectedLeadIds);
+  if (ids.length === 0) return;
+  if (!confirm(`Permanently delete ${ids.length} selected lead${ids.length === 1 ? "" : "s"}?\n\nThis removes each lead, its comments, and its history for good. This cannot be undone.`)) return;
+  try {
+    const res = await api("/leads/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) });
+    showToast(`Permanently deleted ${res.deleted} lead${res.deleted === 1 ? "" : "s"}`);
+    state.selectedLeadIds.clear();
+    state.deletionLogLoaded = false;
+    await loadLeads();
+  } catch (e) { showToast(e.message); }
+}
 async function submitComment(id) {
   const text = document.getElementById("commentBox").value.trim();
   if (!text) return;
@@ -956,6 +999,7 @@ window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilt
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout;
 window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
 window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
+window.toggleLeadSelection = toggleLeadSelection; window.toggleSelectAllLeads = toggleSelectAllLeads; window.clearLeadSelection = clearLeadSelection; window.bulkDeleteSelected = bulkDeleteSelected;
 window.createUser = createUser; window.resetPassword = resetPassword; window.toggleActive = toggleActive; window.editUsername = editUsername; window.downloadAllLeads = downloadAllLeads; window.changeOwnPassword = changeOwnPassword;
 
 boot();
