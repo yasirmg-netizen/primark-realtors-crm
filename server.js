@@ -272,13 +272,27 @@ app.post("/api/leads/:id/comments", requireAuth, ah(async (req, res) => {
 
 app.post("/api/leads/import", requireAuth, ah(async (req, res) => {
   const rows = (req.body && req.body.rows) || [];
+  // Users (for matching "Assigned To" by name) - only admins/super admins can
+  // set this; a rep's imports always land on themselves regardless of what
+  // the CSV says.
+  const users = await db.all("SELECT id, name, username FROM users WHERE active = 1");
+  function resolveAssignee(raw) {
+    if (req.user.role === "rep" || !raw) return req.user.id;
+    const match = users.find((u) => u.name.toLowerCase() === String(raw).trim().toLowerCase() || u.username.toLowerCase() === String(raw).trim().toLowerCase());
+    return match ? match.id : req.user.id;
+  }
   const statements = rows.map((r) => ({
-    sql: `INSERT INTO leads (id,name,phone,email,source,campaign,status,assigned_to,deal_value,created_at,updated_at,site_visit_status,lead_type)
-          VALUES (?,?,?,?,?,?,'New',?,?,?,?,'Not scheduled','Buyer')`,
+    sql: `INSERT INTO leads (id,name,phone,email,source,campaign,status,assigned_to,deal_value,
+          follow_up_date,property_interest,configuration,budget_min,budget_max,preferred_location,
+          lead_type,channel_partner,site_visit_status,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,'New',?,?,?,?,?,?,?,?,?,?,'Not scheduled',?,?)`,
     args: [
       uid(), r.name || "Unnamed lead", r.phone || "", r.email || "", r.source || "Other", r.campaign || "",
-      req.user.role === "rep" ? req.user.id : (r.assigned_to || req.user.id),
-      Number(r.deal_value) || 0, nowISO(), nowISO(),
+      resolveAssignee(r.assigned_to),
+      Number(r.deal_value) || 0, r.follow_up_date || null, r.property_interest || "", r.configuration || "",
+      Number(r.budget_min) || null, Number(r.budget_max) || null, r.preferred_location || "",
+      r.lead_type || "Buyer", r.channel_partner || "",
+      nowISO(), nowISO(),
     ],
   }));
   if (statements.length) await db.client.batch(statements, "write");
