@@ -123,6 +123,8 @@ let state = {
   campaigns: [],
   campaignsLoaded: false,
   teamRoster: [],
+  deletionLog: [],
+  deletionLogLoaded: false,
   loading: true,
 };
 
@@ -554,31 +556,56 @@ function handleCsv(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
     const rows = csvParse(e.target.result);
-    pendingCsvRows = rows;
-    const headers = Object.keys(rows[0] || {});
     const get = (row, keys) => { for (const k of keys) { const found = Object.keys(row).find((rk) => rk.trim().toLowerCase() === k); if (found && row[found]) return row[found]; } return ""; };
     const knownPhones = new Set(state.leads.map((l) => (l.phone || "").replace(/\D/g, "")).filter(Boolean));
-    const dupCount = rows.filter((r) => { const p = get(r, ["phone", "contact number", "contact"]).replace(/\D/g, ""); return p && knownPhones.has(p); }).length;
+    rows.forEach((r) => {
+      const p = get(r, ["phone", "contact number", "contact"]).replace(/\D/g, "");
+      r.__isDuplicate = !!(p && knownPhones.has(p));
+    });
+    pendingCsvRows = rows;
+    const headers = Object.keys(rows[0] || {}).filter((h) => h !== "__isDuplicate");
+    const dupCount = rows.filter((r) => r.__isDuplicate).length;
     document.getElementById("csvPreview").innerHTML = `
       <div class="card"><div class="card-title">Preview \u2014 ${rows.length} rows found</div>
-        ${dupCount > 0 ? `<div style="margin-bottom:12px;padding:8px 10px;background:#3A2A1F;border:1px solid #6B4A2A;border-radius:6px;font-size:12.5px;color:#F0A868;">\u26A0 ${dupCount} row${dupCount > 1 ? "s" : ""} match a phone number already in your visible leads. They\u2019ll still import - review the "Leads" tab afterward to merge or disqualify duplicates.</div>` : ""}
+        ${dupCount > 0 ? `<div style="margin-bottom:12px;padding:10px 12px;background:#3A2A1F;border:1px solid #6B4A2A;border-radius:6px;font-size:12.5px;color:#F0A868;">
+          \u26A0 ${dupCount} of ${rows.length} row${rows.length > 1 ? "s" : ""} match a phone number already in the system - for example, if this file (or an overlapping one) was already imported before.
+          <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-weight:600;cursor:pointer;">
+            <input type="checkbox" id="csv_skip_dups" checked style="width:auto;" onchange="updateCsvImportButton()" />
+            Skip those ${dupCount} duplicate row${dupCount > 1 ? "s" : ""} (recommended)
+          </label>
+        </div>` : ""}
         <div class="table-scroll"><table class="leads-table"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}<th>Duplicate?</th></tr></thead>
         <tbody>${rows.slice(0, 5).map((r) => {
-          const p = get(r, ["phone", "contact number", "contact"]).replace(/\D/g, "");
-          const isDup = p && knownPhones.has(p);
-          return `<tr>${headers.map((h) => `<td>${esc(r[h])}</td>`).join("")}<td>${isDup ? '<span class="overdue">Yes</span>' : "\u2014"}</td></tr>`;
+          return `<tr>${headers.map((h) => `<td>${esc(r[h])}</td>`).join("")}<td>${r.__isDuplicate ? '<span class="overdue">Yes</span>' : "\u2014"}</td></tr>`;
         }).join("")}</tbody></table></div>
+        ${rows.length > 5 ? `<div style="font-size:11.5px;color:var(--muted);margin-top:8px;">Showing the first 5 of ${rows.length} rows - the duplicate count above covers all of them.</div>` : ""}
         <div style="display:flex;gap:10px;margin-top:16px;">
-          <button class="primary" onclick="confirmCsvImport()">Import ${rows.length} leads</button>
+          <button class="primary" id="csv_import_btn" onclick="confirmCsvImport()">Import ${rows.length} leads</button>
           <button class="ghost" onclick="document.getElementById('csvPreview').innerHTML=''">Cancel</button>
         </div>
       </div>`;
+    updateCsvImportButton();
   };
   reader.readAsText(file);
 }
+function updateCsvImportButton() {
+  const skipBox = document.getElementById("csv_skip_dups");
+  const btn = document.getElementById("csv_import_btn");
+  if (!skipBox || !btn) return;
+  const total = pendingCsvRows.length;
+  const dupCount = pendingCsvRows.filter((r) => r.__isDuplicate).length;
+  const toImport = skipBox.checked ? total - dupCount : total;
+  btn.textContent = `Import ${toImport} lead${toImport === 1 ? "" : "s"}` + (skipBox.checked && dupCount > 0 ? ` (${dupCount} skipped)` : "");
+}
+
 async function confirmCsvImport() {
   const get = (row, keys) => { for (const k of keys) { const found = Object.keys(row).find((rk) => rk.trim().toLowerCase() === k); if (found && row[found]) return row[found]; } return ""; };
-  const rows = pendingCsvRows.map((r) => ({
+  const skipBox = document.getElementById("csv_skip_dups");
+  const skipDuplicates = skipBox ? skipBox.checked : false;
+  const sourceRows = skipDuplicates ? pendingCsvRows.filter((r) => !r.__isDuplicate) : pendingCsvRows;
+  const skippedCount = pendingCsvRows.length - sourceRows.length;
+  if (sourceRows.length === 0) return showToast("Nothing to import - every row was a duplicate and skip was selected.");
+  const rows = sourceRows.map((r) => ({
     name: get(r, ["name", "client name"]) || "Unnamed lead", phone: get(r, ["phone", "contact number", "contact"]),
     email: get(r, ["email", "email id"]), source: SOURCES.includes(get(r, ["source", "source of lead"])) ? get(r, ["source", "source of lead"]) : "Other",
     campaign: get(r, ["campaign", "campaign name"]),
@@ -593,8 +620,11 @@ async function confirmCsvImport() {
     assigned_to: get(r, ["assigned to", "assignedto", "rep"]),
     deal_value: Number(get(r, ["dealvalue", "deal value", "value"])) || 0,
   }));
-  try { const res = await api("/leads/import", { method: "POST", body: JSON.stringify({ rows }) }); showToast("Imported " + res.imported + " leads"); state.tab = "leads"; await loadLeads(); }
-  catch (e) { showToast(e.message); }
+  try {
+    const res = await api("/leads/import", { method: "POST", body: JSON.stringify({ rows }) });
+    showToast(`Imported ${res.imported} lead${res.imported === 1 ? "" : "s"}` + (skippedCount > 0 ? `, skipped ${skippedCount} duplicate${skippedCount === 1 ? "" : "s"}` : ""));
+    state.tab = "leads"; await loadLeads();
+  } catch (e) { showToast(e.message); }
 }
 
 function a2hsBannerHTML() {
@@ -652,11 +682,50 @@ function reportsTab(s) {
     </div>
     ${s.disqualified.length > 0 ? `<div class="card"><div class="card-title">Disqualified leads \u2014 by reason</div>${bars(s.byReason, "reason", "count", "#C9B380")}</div>` : ""}
     ${state.user.role === "super_admin" ? `
+      ${duplicateLeadsHTML()}
       <div class="card"><div class="card-title">Full data export</div>
         <p style="font-size:12.5px;color:var(--muted);margin:0 0 12px;">Downloads every lead in the system to a file you can open in Excel. Restricted to super admins.</p>
         <button class="primary" onclick="downloadAllLeads()">Download all leads (Excel/CSV)</button>
-      </div>` : ""}
+      </div>
+      ${deletionLogHTML()}` : ""}
   `;
+}
+function findDuplicateLeadGroups() {
+  const byPhone = {};
+  state.leads.forEach((l) => {
+    const p = (l.phone || "").replace(/\D/g, "");
+    if (!p) return;
+    (byPhone[p] = byPhone[p] || []).push(l);
+  });
+  return Object.values(byPhone).filter((g) => g.length > 1).sort((a, b) => b.length - a.length);
+}
+function duplicateLeadsHTML() {
+  const groups = findDuplicateLeadGroups();
+  if (groups.length === 0) return `<div class="card"><div class="card-title">Duplicate leads</div><div style="color:var(--muted);font-size:13px;">No duplicate phone numbers found - nothing to clean up.</div></div>`;
+  return `<div class="card"><div class="card-title">Duplicate leads \u2014 ${groups.length} phone number${groups.length > 1 ? "s" : ""} with repeats</div>
+    <p style="font-size:12.5px;color:var(--muted);margin:0 0 12px;">Review each group and delete whichever entries are true duplicates - keep the one with the most complete or most recent activity.</p>
+    ${groups.map((g) => `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;">
+        <div style="font-size:11.5px;color:var(--muted);margin-bottom:6px;">${esc(g[0].phone)} \u2014 ${g.length} matching leads</div>
+        ${g.map((l) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-top:1px solid var(--border);">
+          <div style="font-size:13px;">${esc(l.name)} <span style="color:var(--muted);">\u00b7 ${esc(l.status)} \u00b7 assigned to ${esc(l.assigned_to_name)} \u00b7 added ${fmtDate(l.created_at)}</span></div>
+          <div><button class="row-btn" onclick="openLead('${l.id}')">Open</button>
+          <button class="danger" style="margin-left:8px;padding:5px 9px;font-size:11px;" onclick="deleteLead('${l.id}', '${esc(l.name).replace(/'/g, "\\'")}')">Delete</button></div>
+        </div>`).join("")}
+      </div>`).join("")}
+  </div>`;
+}
+function deletionLogHTML() {
+  if (!state.deletionLogLoaded) {
+    api("/deleted-leads-log").then((d) => { state.deletionLog = d.log; state.deletionLogLoaded = true; render(); }).catch(() => { state.deletionLogLoaded = true; });
+    return "";
+  }
+  if (!state.deletionLog || state.deletionLog.length === 0) return "";
+  return `<div class="card"><div class="card-title">Deletion log</div>
+    <div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Phone</th><th>Source</th><th>Deleted by</th><th>When</th></tr></thead><tbody>
+    ${state.deletionLog.map((d) => `<tr><td>${esc(d.lead_name)}</td><td>${esc(d.lead_phone)}</td><td>${esc(d.lead_source)}</td><td>${esc(d.deleted_by_name)}</td><td>${fmtDateTime(d.deleted_at)}</td></tr>`).join("")}
+    </tbody></table></div>
+  </div>`;
 }
 async function downloadAllLeads() {
   try {
@@ -804,6 +873,11 @@ function drawerHTML(l) {
           <textarea id="commentBox" rows="2" placeholder="Add a comment or call outcome\u2026" style="margin-top:6px;"></textarea>
           <button class="ghost" style="margin-top:8px;" onclick="submitComment('${l.id}')">Add comment</button>
         </div>
+        ${state.user.role === "super_admin" ? `
+        <div style="margin-top:20px;padding:14px;border:1px solid var(--danger);border-radius:8px;">
+          <div style="font-size:11.5px;color:var(--danger);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Danger zone</div>
+          <button class="danger" onclick="deleteLead('${l.id}', '${esc(l.name).replace(/'/g, "\\'")}')">Delete this lead permanently</button>
+        </div>` : ""}
       </div>
     </div>
   `;
@@ -818,6 +892,16 @@ async function reassignLead(id, newUserId) {
   try {
     await api("/leads/" + id, { method: "PATCH", body: JSON.stringify({ assigned_to: Number(newUserId) }) });
     showToast(user ? "Reassigned to " + user.name : "Reassigned");
+    await loadLeads();
+  } catch (e) { showToast(e.message); }
+}
+async function deleteLead(id, name) {
+  if (!confirm(`Permanently delete "${name}"?\n\nThis removes the lead, its comments, and its history for good. This cannot be undone.`)) return;
+  try {
+    await api("/leads/" + id, { method: "DELETE" });
+    showToast(`"${name}" was permanently deleted`);
+    closeLead();
+    state.deletionLogLoaded = false;
     await loadLeads();
   } catch (e) { showToast(e.message); }
 }
@@ -870,8 +954,8 @@ function closeLead() { state.selectedId = null; render(); }
 
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout;
-window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate;
-window.updateLead = updateLead; window.reassignLead = reassignLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
+window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
+window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
 window.createUser = createUser; window.resetPassword = resetPassword; window.toggleActive = toggleActive; window.editUsername = editUsername; window.downloadAllLeads = downloadAllLeads; window.changeOwnPassword = changeOwnPassword;
 
 boot();
