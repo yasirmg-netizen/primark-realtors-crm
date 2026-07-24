@@ -85,6 +85,14 @@ const SCHEMA = [
     name TEXT UNIQUE NOT NULL,
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS deleted_leads_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_name TEXT,
+    lead_phone TEXT,
+    lead_source TEXT,
+    deleted_by_name TEXT NOT NULL,
+    deleted_at TEXT NOT NULL
+  )`,
 ];
 
 // Adds a column if an already-existing database doesn't have it yet.

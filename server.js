@@ -270,6 +270,29 @@ app.post("/api/leads/:id/comments", requireAuth, ah(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Deleting a lead is permanent and irreversible - restricted to super admins
+// only, and always leaves a record in deleted_leads_log (who deleted what,
+// when) even though the lead itself, and its comments/audit history, are
+// genuinely removed. This is a deliberately different tier of action from
+// everything else in the app, which prefers Disqualified/Lost over erasing.
+app.delete("/api/leads/:id", requireAuth, requireRole("super_admin"), ah(async (req, res) => {
+  const lead = await db.get("SELECT * FROM leads WHERE id = ?", [req.params.id]);
+  if (!lead) return res.status(404).json({ error: "Lead not found." });
+  await db.run(
+    "INSERT INTO deleted_leads_log (lead_name, lead_phone, lead_source, deleted_by_name, deleted_at) VALUES (?, ?, ?, ?, ?)",
+    [lead.name, lead.phone, lead.source, req.user.name, nowISO()]
+  );
+  await db.run("DELETE FROM comments WHERE lead_id = ?", [lead.id]);
+  await db.run("DELETE FROM audit_log WHERE lead_id = ?", [lead.id]);
+  await db.run("DELETE FROM leads WHERE id = ?", [lead.id]);
+  res.json({ ok: true });
+}));
+
+app.get("/api/deleted-leads-log", requireAuth, requireRole("super_admin"), ah(async (req, res) => {
+  const rows = await db.all("SELECT * FROM deleted_leads_log ORDER BY deleted_at DESC LIMIT 100");
+  res.json({ log: rows });
+}));
+
 app.post("/api/leads/import", requireAuth, ah(async (req, res) => {
   const rows = (req.body && req.body.rows) || [];
   // Users (for matching "Assigned To" by name) - only admins/super admins can
