@@ -288,6 +288,28 @@ app.delete("/api/leads/:id", requireAuth, requireRole("super_admin"), ah(async (
   res.json({ ok: true });
 }));
 
+// Bulk version of the same thing - same permissions, same permanent log,
+// just applied to a whole selection at once. Each lead is logged individually
+// so the deletion log stays just as informative as single deletes.
+app.post("/api/leads/bulk-delete", requireAuth, requireRole("super_admin"), ah(async (req, res) => {
+  const ids = (req.body && req.body.ids) || [];
+  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: "No leads selected." });
+  let deletedCount = 0;
+  for (const id of ids) {
+    const lead = await db.get("SELECT * FROM leads WHERE id = ?", [id]);
+    if (!lead) continue;
+    await db.run(
+      "INSERT INTO deleted_leads_log (lead_name, lead_phone, lead_source, deleted_by_name, deleted_at) VALUES (?, ?, ?, ?, ?)",
+      [lead.name, lead.phone, lead.source, req.user.name, nowISO()]
+    );
+    await db.run("DELETE FROM comments WHERE lead_id = ?", [lead.id]);
+    await db.run("DELETE FROM audit_log WHERE lead_id = ?", [lead.id]);
+    await db.run("DELETE FROM leads WHERE id = ?", [lead.id]);
+    deletedCount++;
+  }
+  res.json({ deleted: deletedCount });
+}));
+
 app.get("/api/deleted-leads-log", requireAuth, requireRole("super_admin"), ah(async (req, res) => {
   const rows = await db.all("SELECT * FROM deleted_leads_log ORDER BY deleted_at DESC LIMIT 100");
   res.json({ log: rows });
