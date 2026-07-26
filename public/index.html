@@ -48,6 +48,11 @@
   table.leads-table { width:100%; border-collapse:collapse; font-size:13px; }
   table.leads-table th { text-align:left; color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
   table.leads-table td { padding:10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  tr.clickable-row { cursor:pointer; }
+  tr.clickable-row:hover td { background: var(--surface-raised); }
+  .row-chevron { color: var(--gold); text-align:center; font-size:16px; }
+  .clickable-card { cursor:pointer; transition: transform 0.1s, border-color 0.15s; }
+  .clickable-card:hover { border-color: var(--gold-dim); transform: translateY(-1px); }
   .badge { padding:4px 10px; border-radius:20px; font-size:11.5px; font-weight:600; white-space:nowrap; }
   .row-btn { background:transparent; border:none; color:var(--gold); cursor:pointer; font-size:12.5px; font-weight:600; }
   .overdue { color: var(--danger); font-weight:600; }
@@ -123,9 +128,12 @@ let state = {
   campaigns: [],
   campaignsLoaded: false,
   teamRoster: [],
+  assignmentRules: [],
+  assignmentRulesLoaded: false,
   deletionLog: [],
   deletionLogLoaded: false,
   selectedLeadIds: new Set(),
+  quickFilter: null,
   loading: true,
 };
 
@@ -272,9 +280,14 @@ function bars(data, labelKey, valueKey, color) {
     </div>`).join("");
 }
 
+function handleRowClick(event, id) {
+  if (event.target.closest("a, button, input, select")) return;
+  openLead(id);
+}
+
 function leadRow(l, canReassign, showCheckbox) {
   const overdue = l.follow_up_date && new Date(l.follow_up_date) < state.stats.startOfToday && !CLOSED_STATUSES.includes(l.status);
-  return `<tr>
+  return `<tr class="clickable-row" onclick="handleRowClick(event, '${l.id}')">
     ${showCheckbox ? `<td><input type="checkbox" style="width:auto;" ${state.selectedLeadIds.has(l.id) ? "checked" : ""} onchange="toggleLeadSelection('${l.id}', this.checked)" /></td>` : ""}
     <td>${esc(l.name)}${l.property_interest ? `<div style="font-size:11px;color:var(--muted)">${esc(l.property_interest)}</div>` : ""}</td>
     <td>
@@ -290,9 +303,37 @@ function leadRow(l, canReassign, showCheckbox) {
     </select>` : esc(l.assigned_to_name || "\u2014")}</td>
     <td class="${overdue ? "overdue" : ""}">${fmtDate(l.follow_up_date)}</td>
     <td style="color:var(--muted)">${fmtDateTime(l.created_at)}</td>
-    <td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td>
+    <td class="row-chevron">\u203A</td>
   </tr>`;
 }
+
+const QUICK_FILTER_LABELS = {
+  newToday: "New today", pending: "Pending follow-ups", aging: "Aging tasks (overdue)",
+  wonMonth: "Won this month", pipeline: "Open pipeline",
+};
+function applyQuickFilter(l, mode, startOfToday) {
+  if (!mode) return true;
+  const closed = CLOSED_STATUSES.includes(l.status);
+  if (mode === "newToday") return new Date(l.created_at) >= startOfToday;
+  if (mode === "pending") return !closed && l.follow_up_date && new Date(l.follow_up_date) >= startOfToday;
+  if (mode === "aging") return !closed && l.follow_up_date && new Date(l.follow_up_date) < startOfToday;
+  if (mode === "wonMonth") return l.status === "Won" && new Date(l.created_at).getMonth() === new Date().getMonth() && new Date(l.created_at).getFullYear() === new Date().getFullYear();
+  if (mode === "pipeline") return !closed;
+  return true;
+}
+function goToFilteredLeads(mode) {
+  state.tab = "leads";
+  state.filters = { search: "", source: "All", status: "All" };
+  state.quickFilter = mode;
+  render();
+}
+function goToStatusFilter(status) {
+  state.tab = "leads";
+  state.filters = { search: "", source: "All", status };
+  state.quickFilter = null;
+  render();
+}
+function clearQuickFilter() { state.quickFilter = null; render(); }
 
 function render() {
   if (state.loading) { root.innerHTML = `<div style="padding:3rem;text-align:center;color:var(--muted)">Loading\u2026</div>`; return; }
@@ -304,7 +345,7 @@ function render() {
     if (state.filters.source !== "All" && l.source !== state.filters.source) return false;
     if (state.filters.status !== "All" && l.status !== state.filters.status) return false;
     if (state.filters.search) { const s = state.filters.search.toLowerCase(); if (!(`${l.name} ${l.phone} ${l.email}`.toLowerCase().includes(s))) return false; }
-    return true;
+    return applyQuickFilter(l, state.quickFilter, stats.startOfToday);
   }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
   const isAdmin = state.user.role === "admin" || state.user.role === "super_admin";
@@ -354,15 +395,15 @@ function dashboardTab(s) {
     ${a2hsBannerHTML()}
     ${state.user.role === "super_admin" ? backupReminderHTML() : ""}
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">Total leads</div><div class="kpi-value">${s.totalLeads}</div></div>
-      <div class="kpi-card"><div class="kpi-label">New today</div><div class="kpi-value gold">${s.newToday}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Pending follow-ups</div><div class="kpi-value teal">${s.pending}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Aging tasks</div><div class="kpi-value danger">${s.aging.length}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Won this month</div><div class="kpi-value teal">${s.wonThisMonth}</div></div>
-      <div class="kpi-card"><div class="kpi-label">Pipeline value</div>${moneyValueHTML(s.pipelineValue, "gold")}</div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads(null)"><div class="kpi-label">Total leads</div><div class="kpi-value">${s.totalLeads}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('newToday')"><div class="kpi-label">New today</div><div class="kpi-value gold">${s.newToday}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('pending')"><div class="kpi-label">Pending follow-ups</div><div class="kpi-value teal">${s.pending}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('aging')"><div class="kpi-label">Aging tasks</div><div class="kpi-value danger">${s.aging.length}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('wonMonth')"><div class="kpi-label">Won this month</div><div class="kpi-value teal">${s.wonThisMonth}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('pipeline')"><div class="kpi-label">Pipeline value</div>${moneyValueHTML(s.pipelineValue, "gold")}</div>
     </div>
     <div class="card"><div class="card-title">Pipeline by stage</div><div class="funnel">
-      ${s.byStatus.map((st) => `<div class="funnel-seg" style="background:${STATUS_STYLE[st.name].bg};color:${STATUS_STYLE[st.name].text};"><div class="funnel-count">${st.value}</div><div>${st.name}</div></div>`).join("")}
+      ${s.byStatus.map((st) => `<div class="funnel-seg clickable-card" style="background:${STATUS_STYLE[st.name].bg};color:${STATUS_STYLE[st.name].text};" onclick="goToStatusFilter('${st.name}')"><div class="funnel-count">${st.value}</div><div>${st.name}</div></div>`).join("")}
     </div></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
       <div class="card"><div class="card-title">Leads by source</div>${bars(s.bySource, "name", "value", "var(--gold)")}</div>
@@ -371,13 +412,13 @@ function dashboardTab(s) {
     <div class="card"><div class="card-title">Upcoming site visits</div>
       ${s.upcomingVisits.length === 0 ? `<div style="color:var(--muted);font-size:13px;">None scheduled.</div>` :
         `<div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Property</th><th>Visit date</th><th>Assigned</th><th></th></tr></thead><tbody>
-        ${s.upcomingVisits.slice(0, 6).map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.property_interest || "\u2014")}</td><td>${fmtDate(l.site_visit_date)}</td><td>${esc(l.assigned_to_name)}</td><td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td></tr>`).join("")}
+        ${s.upcomingVisits.slice(0, 6).map((l) => `<tr class="clickable-row" onclick="handleRowClick(event, '${l.id}')"><td>${esc(l.name)}</td><td>${esc(l.property_interest || "\u2014")}</td><td>${fmtDate(l.site_visit_date)}</td><td>${esc(l.assigned_to_name)}</td><td class="row-chevron">\u203A</td></tr>`).join("")}
         </tbody></table></div>`}
     </div>
     <div class="card"><div class="card-title">Most overdue follow-ups</div>
       ${s.aging.length === 0 ? `<div style="color:var(--muted);font-size:13px;">Nothing overdue.</div>` :
         `<div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Assigned to</th><th>Due</th><th>Overdue by</th><th></th></tr></thead><tbody>
-        ${s.aging.slice(0, 6).map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.assigned_to_name)}</td><td>${fmtDate(l.follow_up_date)}</td><td class="overdue">${l.daysOverdue}d</td><td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td></tr>`).join("")}
+        ${s.aging.slice(0, 6).map((l) => `<tr class="clickable-row" onclick="handleRowClick(event, '${l.id}')"><td>${esc(l.name)}</td><td>${esc(l.assigned_to_name)}</td><td>${fmtDate(l.follow_up_date)}</td><td class="overdue">${l.daysOverdue}d</td><td class="row-chevron">\u203A</td></tr>`).join("")}
         </tbody></table></div>`}
     </div>
   `;
@@ -398,9 +439,9 @@ function myDayTab() {
     ${visitsToday.length > 0 ? `
       <div class="card"><div class="card-title">Site visits today</div>
         <div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Property</th><th>Contact</th><th>Assigned</th><th></th></tr></thead><tbody>
-        ${visitsToday.map((l) => `<tr><td>${esc(l.name)}</td><td>${esc(l.property_interest || "\u2014")}</td>
+        ${visitsToday.map((l) => `<tr class="clickable-row" onclick="handleRowClick(event, '${l.id}')"><td>${esc(l.name)}</td><td>${esc(l.property_interest || "\u2014")}</td>
           <td>${l.phone ? callBtnHTML(l.phone) : "\u2014"}</td>
-          <td>${esc(l.assigned_to_name || "")}</td><td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td></tr>`).join("")}
+          <td>${esc(l.assigned_to_name || "")}</td><td class="row-chevron">\u203A</td></tr>`).join("")}
         </tbody></table></div>
       </div>` : ""}
     ${dueFollowUps.length > 0 ? `
@@ -408,11 +449,11 @@ function myDayTab() {
         <div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Contact</th><th>Status</th><th>Due</th><th>Assigned</th><th></th></tr></thead><tbody>
         ${dueFollowUps.map((l) => {
           const overdue = l.follow_up_date < todayStr;
-          return `<tr><td>${esc(l.name)}</td>
+          return `<tr class="clickable-row" onclick="handleRowClick(event, '${l.id}')"><td>${esc(l.name)}</td>
             <td>${l.phone ? callBtnHTML(l.phone) + waBtnHTML(l.phone) : "\u2014"}</td>
             <td><span class="badge" style="background:${STATUS_STYLE[l.status].bg};color:${STATUS_STYLE[l.status].text};">${l.status}</span></td>
             <td class="${overdue ? "overdue" : ""}">${fmtDate(l.follow_up_date)}${overdue ? " (overdue)" : ""}</td>
-            <td>${esc(l.assigned_to_name || "")}</td><td><button class="row-btn" onclick="openLead('${l.id}')">Open</button></td></tr>`;
+            <td>${esc(l.assigned_to_name || "")}</td><td class="row-chevron">\u203A</td></tr>`;
         }).join("")}
         </tbody></table></div>
       </div>` : ""}
@@ -426,6 +467,10 @@ function leadsTab(filtered) {
   return `
     <h1 class="page-title">Leads</h1>
     <p class="page-sub">${filtered.length} of ${state.leads.length} leads shown</p>
+    ${state.quickFilter ? `<div class="card" style="padding:10px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;">
+      <div style="font-size:13px;color:var(--gold);">Showing: ${esc(QUICK_FILTER_LABELS[state.quickFilter] || state.quickFilter)}</div>
+      <button class="ghost" style="padding:5px 10px;font-size:12px;" onclick="clearQuickFilter()">Clear \u00d7</button>
+    </div>` : ""}
     <div class="filter-row">
       <select onchange="setFilter('source', this.value)"><option>All</option>${SOURCES.map((s) => `<option ${state.filters.source === s ? "selected" : ""}>${s}</option>`).join("")}</select>
       <select onchange="setFilter('status', this.value)"><option>All</option>${STATUSES.map((s) => `<option ${state.filters.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
@@ -786,13 +831,59 @@ function teamTab() {
         <button class="danger" style="margin-left:6px;" onclick="toggleActive(${u.id}, ${u.active ? 0 : 1})">${u.active ? "Block access" : "Unblock access"}</button></td></tr>`).join("")}
       </tbody></table></div>
     </div>
+    ${assignmentRulesHTML()}
   `;
+}
+function assignmentRulesHTML() {
+  if (!state.assignmentRulesLoaded) {
+    api("/assignment-rules").then((d) => { state.assignmentRules = d.rules; state.assignmentRulesLoaded = true; render(); }).catch(() => { state.assignmentRulesLoaded = true; });
+    return `<div class="card"><div class="card-title">Auto-assignment rules</div><div style="color:var(--muted);font-size:13px;">Loading\u2026</div></div>`;
+  }
+  const reps = state.teamRoster.filter((u) => u.role === "rep");
+  return `<div class="card"><div class="card-title">Auto-assignment rules</div>
+    <p style="font-size:12.5px;color:var(--muted);margin:0 0 14px;">
+      When a new lead arrives automatically (via Instagram/Facebook or another connected platform), it checks these rules first - a matching campaign always goes to the rep listed here.
+      Leads with no matching rule are assigned by round-robin across active reps instead (super admins and admins are never included in that rotation).
+    </p>
+    ${state.assignmentRules.length === 0 ? `<div style="font-size:13px;color:var(--muted);margin-bottom:14px;">No rules yet - every auto-captured lead currently goes through round-robin.</div>` : `
+    <div class="table-scroll" style="margin-bottom:14px;"><table class="leads-table"><thead><tr><th>Campaign</th><th>Always assign to</th><th></th></tr></thead><tbody>
+      ${state.assignmentRules.map((r) => `<tr><td>${esc(r.campaign)}</td><td>${esc(r.assigned_to_name)}</td>
+        <td><button class="danger" style="padding:5px 9px;font-size:11px;" onclick="deleteAssignmentRule(${r.id})">Remove</button></td></tr>`).join("")}
+    </tbody></table></div>`}
+    <div class="two-col">
+      <div class="field-row"><label>Campaign</label><input id="rule_campaign" list="campaign_list_rule" placeholder="e.g. Diwali Offer 2026" />
+        <datalist id="campaign_list_rule">${state.campaigns.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
+      </div>
+      <div class="field-row"><label>Always assign to</label><select id="rule_rep">${reps.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select></div>
+    </div>
+    <button class="primary" onclick="addAssignmentRule()">Add rule</button>
+  </div>`;
 }
 async function createUser() {
   const body = { name: document.getElementById("u_name").value.trim(), username: document.getElementById("u_username").value.trim(),
     password: document.getElementById("u_password").value, role: document.getElementById("u_role").value };
   try { await api("/users", { method: "POST", body: JSON.stringify(body) }); showToast("Account created"); state.usersLoaded = false; render(); }
   catch (e) { showToast(e.message); }
+}
+async function addAssignmentRule() {
+  const campaign = document.getElementById("rule_campaign").value.trim();
+  const assigned_to = document.getElementById("rule_rep").value;
+  if (!campaign) return showToast("Enter a campaign name for this rule.");
+  try {
+    await api("/assignment-rules", { method: "POST", body: JSON.stringify({ campaign, assigned_to }) });
+    showToast("Rule saved");
+    state.assignmentRulesLoaded = false;
+    render();
+  } catch (e) { showToast(e.message); }
+}
+async function deleteAssignmentRule(id) {
+  if (!confirm("Remove this auto-assignment rule? New matching leads will go through round-robin instead.")) return;
+  try {
+    await api("/assignment-rules/" + id, { method: "DELETE" });
+    showToast("Rule removed");
+    state.assignmentRulesLoaded = false;
+    render();
+  } catch (e) { showToast(e.message); }
 }
 async function resetPassword(id) {
   const pw = prompt("New temporary password for this user:");
@@ -989,18 +1080,20 @@ function doLogin() {
   login(u, p);
 }
 
-function setTab(t) { state.tab = t; state.usersLoaded = t === "team" ? state.usersLoaded : state.usersLoaded; render(); }
+function setTab(t) { state.tab = t; state.quickFilter = null; render(); }
 function setSearch(v) { state.filters.search = v; render(); }
-function setFilter(k, v) { state.filters[k] = v; render(); }
+function setFilter(k, v) { state.filters[k] = v; state.quickFilter = null; render(); }
 function openLead(id) { state.selectedId = id; render(); }
 function closeLead() { state.selectedId = null; render(); }
 
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
-window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout;
+window.goToFilteredLeads = goToFilteredLeads; window.goToStatusFilter = goToStatusFilter; window.clearQuickFilter = clearQuickFilter;
+window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout; window.handleRowClick = handleRowClick;
 window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
 window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
 window.toggleLeadSelection = toggleLeadSelection; window.toggleSelectAllLeads = toggleSelectAllLeads; window.clearLeadSelection = clearLeadSelection; window.bulkDeleteSelected = bulkDeleteSelected;
 window.createUser = createUser; window.resetPassword = resetPassword; window.toggleActive = toggleActive; window.editUsername = editUsername; window.downloadAllLeads = downloadAllLeads; window.changeOwnPassword = changeOwnPassword;
+window.addAssignmentRule = addAssignmentRule; window.deleteAssignmentRule = deleteAssignmentRule;
 
 boot();
 </script>
