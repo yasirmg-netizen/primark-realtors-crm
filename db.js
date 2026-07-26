@@ -93,6 +93,12 @@ const SCHEMA = [
     deleted_by_name TEXT NOT NULL,
     deleted_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS assignment_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign TEXT UNIQUE NOT NULL,
+    assigned_to INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL
+  )`,
 ];
 
 // Adds a column if an already-existing database doesn't have it yet.

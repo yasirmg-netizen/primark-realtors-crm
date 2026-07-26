@@ -394,22 +394,69 @@ app.get("/api/settings/last-backup", requireAuth, requireRole("super_admin"), ah
 // Picks the active rep currently carrying the fewest open (non-closed) leads.
 // This self-balances the team automatically - no rotation counter to maintain,
 // and a rep who's just closed a batch of deals naturally gets the next ones.
-async function pickAutoRouteRep() {
-  const reps = await db.all("SELECT id, name FROM users WHERE role = 'rep' AND active = 1");
+// Auto-assignment logic, in priority order:
+// 1. If this lead's campaign has a configured rule, always goes to that rep
+//    (regardless of their current workload) - e.g. "Diwali Offer" always
+//    goes to the rep who knows that property best.
+// 2. Otherwise, true round-robin across active reps - each new lead goes to
+//    whoever is next in rotation, tracked via a settings row so it survives
+//    restarts. Super admins (and admins) are never in this pool at all,
+//    since only role='rep' is queried below.
+async function pickAutoRouteRep(campaign) {
+  if (campaign) {
+    const rule = await db.get(
+      `SELECT assignment_rules.assigned_to as assigned_to FROM assignment_rules
+       JOIN users ON users.id = assignment_rules.assigned_to
+       WHERE LOWER(assignment_rules.campaign) = LOWER(?) AND users.active = 1`,
+      [campaign]
+    );
+    if (rule) return rule.assigned_to;
+  }
+  const reps = await db.all("SELECT id, name FROM users WHERE role = 'rep' AND active = 1 ORDER BY id");
   if (reps.length === 0) return null;
-  const loads = await db.all(
-    `SELECT assigned_to, COUNT(*) as open_count FROM leads
-     WHERE status NOT IN ('Won','Lost','Disqualified') GROUP BY assigned_to`
+  const lastRow = await db.get("SELECT value FROM settings WHERE key = 'round_robin_last_rep_id'");
+  const lastId = lastRow ? Number(lastRow.value) : null;
+  let nextIndex = 0;
+  if (lastId !== null) {
+    const lastIndex = reps.findIndex((r) => r.id === lastId);
+    nextIndex = lastIndex === -1 ? 0 : (lastIndex + 1) % reps.length;
+  }
+  const chosen = reps[nextIndex];
+  await db.run(
+    "INSERT INTO settings (key, value) VALUES ('round_robin_last_rep_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [String(chosen.id)]
   );
-  const loadMap = {}; loads.forEach((l) => { loadMap[l.assigned_to] = l.open_count; });
-  reps.sort((a, b) => (loadMap[a.id] || 0) - (loadMap[b.id] || 0));
-  return reps[0].id;
+  return chosen.id;
 }
+
+app.get("/api/assignment-rules", requireAuth, requireRole("admin", "super_admin"), ah(async (req, res) => {
+  const rows = await db.all(
+    `SELECT assignment_rules.id, assignment_rules.campaign, assignment_rules.assigned_to, users.name as assigned_to_name
+     FROM assignment_rules JOIN users ON users.id = assignment_rules.assigned_to ORDER BY assignment_rules.campaign`
+  );
+  res.json({ rules: rows });
+}));
+
+app.post("/api/assignment-rules", requireAuth, requireRole("admin", "super_admin"), ah(async (req, res) => {
+  const { campaign, assigned_to } = req.body || {};
+  if (!campaign || !assigned_to) return res.status(400).json({ error: "Campaign and assigned rep are both required." });
+  await db.run(
+    `INSERT INTO assignment_rules (campaign, assigned_to, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(campaign) DO UPDATE SET assigned_to = excluded.assigned_to`,
+    [campaign.trim(), Number(assigned_to), nowISO()]
+  );
+  res.json({ ok: true });
+}));
+
+app.delete("/api/assignment-rules/:id", requireAuth, requireRole("admin", "super_admin"), ah(async (req, res) => {
+  await db.run("DELETE FROM assignment_rules WHERE id = ?", [req.params.id]);
+  res.json({ ok: true });
+}));
 
 async function createLeadFromWebhook({ name, phone, email, source, campaign, note }) {
   const id = uid();
   const now = nowISO();
-  const assignedTo = await pickAutoRouteRep();
+  const assignedTo = await pickAutoRouteRep(campaign);
   await db.run(
     `INSERT INTO leads (id,name,phone,email,source,campaign,status,assigned_to,deal_value,created_at,updated_at,site_visit_status,lead_type)
      VALUES (?,?,?,?,?,?,'New',?,0,?,?,'Not scheduled','Buyer')`,
