@@ -126,6 +126,7 @@ let state = {
   selectedId: null,
   filters: { search: "", source: "All", status: "All", assignedTo: "All", campaign: "All", configuration: "All", leadType: "All", dateFrom: "", dateTo: "" }, // kept in sync with defaultFilters()
   showMoreFilters: false,
+  leadsView: "table",
   sortField: "created_at",
   sortDirection: "desc",
   savedViews: [],
@@ -138,9 +139,12 @@ let state = {
   teamRoster: [],
   assignmentRules: [],
   assignmentRulesLoaded: false,
+  campaignSpend: {},
+  campaignSpendLoaded: false,
   deletionLog: [],
   deletionLogLoaded: false,
   selectedLeadIds: new Set(),
+  callQueueSkipped: new Set(),
   quickFilter: null,
   loading: true,
 };
@@ -272,11 +276,13 @@ function computeStats(leads, team) {
   const byRep = repNames.map((rep) => {
     const mine = leads.filter((l) => l.assigned_to_name === rep);
     const won = mine.filter((l) => l.status === "Won").length;
-    return { rep, total: mine.length, won, pending: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).length,
+    const wonThisMonthCount = mine.filter((l) => l.status === "Won" && new Date(l.created_at).getMonth() === new Date().getMonth() && new Date(l.created_at).getFullYear() === new Date().getFullYear()).length;
+    return { rep, total: mine.length, won, wonThisMonth: wonThisMonthCount, pending: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).length,
       conversion: mine.length ? Math.round((won / mine.length) * 100) : 0,
       pipelineValue: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).reduce((s, l) => s + (l.deal_value || 0), 0),
       avgFirstContactMs: avgFirstContactMs(mine) };
   });
+  const leaderboard = byRep.slice().sort((a, b) => b.wonThisMonth - a.wonThisMonth || b.conversion - a.conversion);
   const avgFirstContactOverallMs = avgFirstContactMs(leads);
   const disqualified = leads.filter((l) => l.status === "Disqualified");
   const byReason = DISQUALIFY_REASONS.map((r) => ({ reason: r, count: disqualified.filter((l) => (l.disqualify_reason || "Other") === r).length })).filter((x) => x.count > 0);
@@ -289,7 +295,7 @@ function computeStats(leads, team) {
       conversion: mine.length ? Math.round((won / mine.length) * 100) : 0,
       pipelineValue: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).reduce((s, l) => s + (l.deal_value || 0), 0) };
   }).sort((a, b) => b.total - a.total);
-  return { totalLeads: leads.length, newToday, pending, aging, wonThisMonth, pipelineValue, weightedValue, bySource, byStatus, byRep, disqualified, byReason, upcomingVisits, byCampaign, avgFirstContactOverallMs, startOfToday };
+  return { totalLeads: leads.length, newToday, pending, aging, wonThisMonth, pipelineValue, weightedValue, bySource, byStatus, byRep, disqualified, byReason, upcomingVisits, byCampaign, avgFirstContactOverallMs, leaderboard, startOfToday };
 }
 
 function bars(data, labelKey, valueKey, color) {
@@ -415,13 +421,14 @@ function render() {
 
   const isAdmin = state.user.role === "admin" || state.user.role === "super_admin";
   const nav = [
-    ["dashboard", "Dashboard"], ["myday", "My Day"], ["leads", "Leads"], ["add", "Add lead"], ["import", "Import CSV"], ["reports", "Reports"],
+    ["dashboard", "Dashboard"], ["myday", "My Day"], ["callqueue", "Call Queue"], ["leads", "Leads"], ["add", "Add lead"], ["import", "Import CSV"], ["reports", "Reports"],
   ];
   if (isAdmin) nav.push(["team", "Team"]);
 
   let body = "";
   if (state.tab === "dashboard") body = dashboardTab(stats);
   else if (state.tab === "myday") body = myDayTab();
+  else if (state.tab === "callqueue") body = callQueueTab();
   else if (state.tab === "leads") body = leadsTab(filtered);
   else if (state.tab === "add") body = addLeadTab();
   else if (state.tab === "import") body = importTab();
@@ -475,6 +482,18 @@ function dashboardTab(s) {
       <div class="card"><div class="card-title">Leads by source</div>${bars(s.bySource, "name", "value", "var(--gold)")}</div>
       <div class="card"><div class="card-title">Team productivity (assigned)</div>${bars(s.byRep, "rep", "total", "var(--teal)")}</div>
     </div>
+    ${s.leaderboard.length > 0 ? `
+    <div class="card"><div class="card-title">\uD83C\uDFC6 Team Leaderboard - This Month</div>
+      ${s.leaderboard.map((r, i) => {
+        const medal = i === 0 ? "\uD83E\uDD47" : i === 1 ? "\uD83E\uDD48" : i === 2 ? "\uD83E\uDD49" : (i + 1) + ".";
+        return `<div style="display:flex;align-items:center;gap:12px;padding:8px 4px;${i < s.leaderboard.length - 1 ? "border-bottom:1px solid var(--border);" : ""}">
+          <div style="width:28px;font-size:15px;text-align:center;">${medal}</div>
+          <div style="flex:1;font-size:13.5px;">${esc(r.rep)}</div>
+          <div style="font-size:12.5px;color:var(--muted);">${r.wonThisMonth} won this month \u00b7 ${r.conversion}% conversion</div>
+        </div>`;
+      }).join("")}
+      <div style="font-size:11px;color:var(--muted);margin-top:10px;">Ranked by deals won this month, then overall conversion rate. A friendly nudge, not a report card.</div>
+    </div>` : ""}
     <div class="card"><div class="card-title">Upcoming site visits</div>
       ${s.upcomingVisits.length === 0 ? `<div style="color:var(--muted);font-size:13px;">None scheduled.</div>` :
         `<div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Property</th><th>Visit date</th><th>Assigned</th><th></th></tr></thead><tbody>
@@ -488,6 +507,84 @@ function dashboardTab(s) {
         </tbody></table></div>`}
     </div>
   `;
+}
+
+function buildCallQueue() {
+  const todayStr = state.stats.startOfToday.toISOString().slice(0, 10);
+  const active = state.leads.filter((l) => !CLOSED_STATUSES.includes(l.status));
+  const due = active.filter((l) => l.follow_up_date && l.follow_up_date <= todayStr);
+  due.sort((a, b) => new Date(a.follow_up_date) - new Date(b.follow_up_date));
+  const notSkipped = due.filter((l) => !state.callQueueSkipped.has(l.id));
+  const skipped = due.filter((l) => state.callQueueSkipped.has(l.id));
+  return notSkipped.concat(skipped);
+}
+
+function callQueueTab() {
+  const queue = buildCallQueue();
+  if (queue.length === 0) {
+    return `
+      <h1 class="page-title">Call Queue</h1>
+      <p class="page-sub">Your focused, one-at-a-time follow-up list</p>
+      <div class="card" style="text-align:center;padding:44px 20px;">
+        <div style="font-size:34px;margin-bottom:10px;">\u2705</div>
+        <div style="font-size:15px;">Nothing due right now. Nice work staying on top of it.</div>
+      </div>`;
+  }
+  const l = queue[0];
+  const todayStr = state.stats.startOfToday.toISOString().slice(0, 10);
+  const overdue = l.follow_up_date < todayStr;
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  return `
+    <h1 class="page-title">Call Queue</h1>
+    <p class="page-sub">${queue.length} lead${queue.length === 1 ? "" : "s"} remaining - working through them one at a time</p>
+    <div class="card" style="max-width:640px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;">
+        <div>
+          <h2 style="margin:0;font-family:Georgia,serif;font-size:20px;">${esc(l.name)}</h2>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px;">${esc(l.source)}${l.campaign ? ` \u00b7 ${esc(l.campaign)}` : ""}${l.property_interest ? ` \u00b7 ${esc(l.property_interest)}` : ""}</div>
+        </div>
+        <div class="${overdue ? "overdue" : ""}" style="font-size:12.5px;white-space:nowrap;">${overdue ? "Overdue" : "Due today"} \u00b7 ${fmtDate(l.follow_up_date)}</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        ${l.phone ? callBtnHTML(l.phone, "Call " + l.phone) + waBtnHTML(l.phone) : "No phone on file"}
+        ${l.email ? emailBtnHTML(l.email) : ""}
+      </div>
+      <div class="two-col">
+        <div class="field-row"><label>Update status</label><select id="cq_status">
+          ${STATUSES.map((s) => `<option ${l.status === s ? "selected" : ""}>${s}</option>`).join("")}
+        </select></div>
+        <div class="field-row"><label>Next follow-up</label><input type="date" id="cq_followup" value="${tomorrow}" /></div>
+      </div>
+      <div class="field-row"><label>Call outcome / notes</label><textarea id="cq_comment" rows="2" placeholder="What happened on the call\u2026"></textarea></div>
+      <div style="display:flex;gap:10px;">
+        <button class="primary" onclick="callQueueSaveAndNext('${l.id}')">Save & Next \u2192</button>
+        <button class="ghost" onclick="callQueueSkip('${l.id}')">Skip for now</button>
+      </div>
+    </div>
+  `;
+}
+
+async function callQueueSaveAndNext(id) {
+  const lead = state.leads.find((l) => l.id === id);
+  if (!lead) return;
+  const status = document.getElementById("cq_status").value;
+  const followup = document.getElementById("cq_followup").value;
+  const comment = document.getElementById("cq_comment").value;
+  const patch = {};
+  if (status !== lead.status) {
+    patch.status = status;
+    if (status === "Disqualified") patch.disqualify_reason = DISQUALIFY_REASONS[0];
+  }
+  if (followup && followup !== lead.follow_up_date) patch.follow_up_date = followup;
+  if (Object.keys(patch).length > 0) await updateLead(id, patch);
+  if (comment && comment.trim()) await submitCommentText(id, comment);
+  showToast("Saved - next lead up");
+  render();
+}
+function callQueueSkip(id) {
+  state.callQueueSkipped.add(id);
+  showToast("Skipped for now");
+  render();
 }
 
 function myDayTab() {
@@ -526,6 +623,55 @@ function myDayTab() {
   `;
 }
 
+function setLeadsView(view) { state.leadsView = view; render(); }
+
+function boardCard(l) {
+  const overdue = l.follow_up_date && new Date(l.follow_up_date) < state.stats.startOfToday && !CLOSED_STATUSES.includes(l.status);
+  return `<div draggable="true" ondragstart="event.dataTransfer.setData('text/plain','${l.id}')"
+    onclick="handleRowClick(event, '${l.id}')"
+    style="background:var(--surface-raised); border:1px solid var(--border); border-radius:8px; padding:9px 10px; cursor:grab;">
+    <div style="font-size:13px; font-weight:600;">${esc(l.name)}</div>
+    ${l.property_interest ? `<div style="font-size:11px;color:var(--muted);margin-top:2px;">${esc(l.property_interest)}</div>` : ""}
+    <div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">
+      ${l.phone ? callBtnHTML(l.phone) + waBtnHTML(l.phone) : ""}
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:7px;font-size:11px;color:var(--muted);">
+      <div>${esc(l.assigned_to_name || "")}</div>
+      <div class="${overdue ? "overdue" : ""}">${l.follow_up_date ? fmtDate(l.follow_up_date) : ""}</div>
+    </div>
+    ${l.deal_value ? `<div style="font-size:11.5px;color:var(--gold);margin-top:4px;font-family:Inter,sans-serif;font-variant-numeric:tabular-nums;">${money(l.deal_value)}</div>` : ""}
+  </div>`;
+}
+
+function boardView(leads) {
+  const columns = STATUSES.map((status) => ({ status, leads: leads.filter((l) => l.status === status) }));
+  return `<div class="table-scroll" style="padding-bottom:10px;">
+    <div style="display:flex; gap:12px; min-width:${STATUSES.length * 232}px;">
+      ${columns.map((col) => `
+        <div style="flex:0 0 220px;" ondragover="event.preventDefault()" ondrop="handleCardDrop(event, '${col.status}')">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding:7px 10px; border-radius:6px; background:${STATUS_STYLE[col.status].bg};">
+            <div style="font-size:12px; font-weight:600; color:${STATUS_STYLE[col.status].text};">${col.status}</div>
+            <div style="font-size:11px; color:${STATUS_STYLE[col.status].text};">${col.leads.length}</div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:8px; min-height:60px; max-height:560px; overflow-y:auto; padding:2px;">
+            ${col.leads.map((l) => boardCard(l)).join("") || `<div style="font-size:11px;color:var(--muted);text-align:center;padding:14px 0;border:1.5px dashed var(--border);border-radius:8px;">Drop here</div>`}
+          </div>
+        </div>`).join("")}
+    </div>
+  </div>`;
+}
+
+async function handleCardDrop(event, status) {
+  event.preventDefault();
+  const id = event.dataTransfer.getData("text/plain");
+  if (!id) return;
+  const lead = state.leads.find((l) => l.id === id);
+  if (!lead || lead.status === status) return;
+  const patch = { status };
+  if (status === "Disqualified") patch.disqualify_reason = DISQUALIFY_REASONS[0];
+  await updateLead(id, patch);
+}
+
 function leadsTab(filtered) {
   const isSuperAdmin = state.user.role === "super_admin";
   const isAdminOrAbove = state.user.role === "admin" || isSuperAdmin;
@@ -534,6 +680,7 @@ function leadsTab(filtered) {
   if (!state.savedViewsLoaded) {
     api("/saved-views").then((d) => { state.savedViews = d.views; state.savedViewsLoaded = true; render(); }).catch(() => { state.savedViewsLoaded = true; });
   }
+  const boardFiltered = state.leads.filter((l) => matchesFilters(l, Object.assign({}, state.filters, { status: "All" })) && applyQuickFilter(l, state.quickFilter, state.stats.startOfToday));
   return `
     <h1 class="page-title">Leads</h1>
     <p class="page-sub">${filtered.length} of ${state.leads.length} leads shown</p>
@@ -542,6 +689,9 @@ function leadsTab(filtered) {
       <button class="ghost" style="padding:5px 10px;font-size:12px;" onclick="clearQuickFilter()">Clear \u00d7</button>
     </div>` : ""}
     <div class="filter-row" style="align-items:center;">
+      <button class="ghost" style="${state.leadsView === "table" ? "background:var(--surface-raised);color:var(--gold);" : ""}" onclick="setLeadsView('table')">\u2630 Table</button>
+      <button class="ghost" style="${state.leadsView === "board" ? "background:var(--surface-raised);color:var(--gold);" : ""}" onclick="setLeadsView('board')">\u25A6 Board</button>
+      <span style="flex:1;"></span>
       <select onchange="applySavedView(this.value)" style="width:auto;min-width:150px;">
         <option value="">Saved views\u2026</option>
         ${state.savedViews.map((v) => `<option value="${v.id}" ${state.activeSavedViewId === v.id ? "selected" : ""}>${esc(v.name)}</option>`).join("")}
@@ -551,7 +701,7 @@ function leadsTab(filtered) {
     </div>
     <div class="filter-row">
       <select onchange="setFilter('source', this.value)"><option>All</option>${SOURCES.map((s) => `<option ${state.filters.source === s ? "selected" : ""}>${s}</option>`).join("")}</select>
-      <select onchange="setFilter('status', this.value)"><option>All</option>${STATUSES.map((s) => `<option ${state.filters.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+      ${state.leadsView === "table" ? `<select onchange="setFilter('status', this.value)"><option>All</option>${STATUSES.map((s) => `<option ${state.filters.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>` : ""}
       ${isAdminOrAbove ? `<select onchange="setFilter('assignedTo', this.value)"><option value="All">All reps</option>${state.teamRoster.map((u) => `<option value="${u.id}" ${String(state.filters.assignedTo) === String(u.id) ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>` : ""}
       <button class="ghost" onclick="toggleMoreFilters()">${state.showMoreFilters ? "Fewer filters \u25B2" : "More filters \u25BC"}</button>
     </div>
@@ -564,7 +714,7 @@ function leadsTab(filtered) {
       <span style="color:var(--muted);font-size:12px;align-self:center;">to</span>
       <input type="date" style="width:auto;" value="${state.filters.dateTo}" onchange="setFilter('dateTo', this.value)" title="Created to" />
     </div>` : ""}
-    ${isSuperAdmin && selectedCount > 0 ? `
+    ${isSuperAdmin && selectedCount > 0 && state.leadsView === "table" ? `
     <div class="card" style="padding:12px 16px;margin-bottom:12px;background:#3A1F22;border:1px solid var(--danger);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div style="font-size:13.5px;color:#F08484;">${selectedCount} lead${selectedCount === 1 ? "" : "s"} selected</div>
       <div style="display:flex;gap:8px;">
@@ -572,6 +722,7 @@ function leadsTab(filtered) {
         <button class="danger" onclick="bulkDeleteSelected()">Delete selected (${selectedCount})</button>
       </div>
     </div>` : ""}
+    ${state.leadsView === "board" ? boardView(boardFiltered) : `
     <div class="card table-scroll" style="padding:0;">
       <table class="leads-table"><thead><tr>
         ${isSuperAdmin ? `<th><input type="checkbox" style="width:auto;" ${allVisibleSelected ? "checked" : ""} onchange="toggleSelectAllLeads(this.checked)" /></th>` : ""}
@@ -584,7 +735,7 @@ function leadsTab(filtered) {
         <th style="cursor:pointer;" onclick="setSort('created_at')">Created${sortIndicator("created_at")}</th>
         <th></th></tr></thead>
       <tbody>${filtered.map((l) => leadRow(l, state.user.role === "admin" || state.user.role === "super_admin", isSuperAdmin)).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
-    </div>
+    </div>`}
   `;
 }
 
@@ -650,6 +801,36 @@ async function checkPhoneDuplicate(fieldId, warningId) {
       box.innerHTML = "";
     }
   } catch (e) { box.innerHTML = ""; }
+}
+async function editLeadPhone(leadId, newValue) {
+  const lead = state.leads.find((l) => l.id === leadId);
+  if (!lead) return;
+  const trimmed = newValue.trim();
+  if (trimmed === (lead.phone || "")) return; // unchanged, nothing to do
+  if (trimmed && !isValidPhoneClient(trimmed)) { showToast("That phone number doesn't look right - use a 10-digit number."); return; }
+  await updateLead(leadId, { phone: trimmed });
+  // updateLead triggers a full re-render (loadLeads), so the warning box must
+  // be looked up fresh afterward - an element reference captured beforehand
+  // would be a detached, invisible node once the DOM rebuilds.
+  const warningBox = document.getElementById("edit_phone_warning_" + leadId);
+  if (trimmed && warningBox) {
+    try {
+      const res = await api("/leads/check-duplicate?phone=" + encodeURIComponent(trimmed) + "&excludeId=" + encodeURIComponent(leadId));
+      if (res.duplicate) {
+        warningBox.innerHTML = `<div style="margin-top:6px;padding:8px 10px;background:#3A2A1F;border:1px solid #6B4A2A;border-radius:6px;font-size:12px;color:#F0A868;">
+          \u26A0 This number now matches an existing lead: <strong>${esc(res.name)}</strong> (${esc(res.status)}), assigned to ${esc(res.assignedToName)}.
+        </div>`;
+      }
+    } catch (e) {}
+  }
+}
+async function editLeadEmail(leadId, newValue) {
+  const lead = state.leads.find((l) => l.id === leadId);
+  if (!lead) return;
+  const trimmed = newValue.trim();
+  if (trimmed === (lead.email || "")) return;
+  if (trimmed && !isValidEmailClient(trimmed)) { showToast("That email address doesn't look right."); return; }
+  await updateLead(leadId, { email: trimmed });
 }
 
 async function submitAddLead() {
@@ -824,6 +1005,7 @@ function reportsTab(s) {
       ${s.byCampaign.map((c) => `<div class="rep-row"><div>${esc(c.campaign)}</div><div>${c.total}</div><div></div><div>${c.won}</div><div>${c.conversion}%</div><div>${money(c.pipelineValue)}</div></div>`).join("")}
       <div style="font-size:11.5px;color:var(--muted);margin-top:10px;">Compare this against what each campaign cost to run, on whichever ad platform's dashboard, for a true cost-per-lead and cost-per-conversion picture.</div>
     </div>` : ""}
+    ${(state.user.role === "admin" || state.user.role === "super_admin") && s.byCampaign.length > 0 ? campaignSpendHTML(s) : ""}
     <div class="card"><div class="card-title">Aging tasks (overdue follow-ups)</div>
       ${s.aging.length === 0 ? `<div style="color:var(--muted);font-size:13px;">No overdue tasks.</div>` :
         `<div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Assigned</th><th>Status</th><th>Due</th><th>Overdue</th></tr></thead><tbody>
@@ -855,6 +1037,33 @@ function findDuplicateLeadGroups() {
   });
   return Object.values(byPhone).filter((g) => g.length > 1).sort((a, b) => b.length - a.length);
 }
+function campaignSpendHTML(s) {
+  if (!state.campaignSpendLoaded) {
+    api("/campaigns/spend").then((d) => {
+      state.campaignSpend = {};
+      d.campaigns.forEach((c) => { state.campaignSpend[c.name] = c; });
+      state.campaignSpendLoaded = true;
+      render();
+    }).catch(() => { state.campaignSpendLoaded = true; });
+    return `<div class="card"><div class="card-title">Campaign spend & cost per lead</div><div style="color:var(--muted);font-size:13px;">Loading\u2026</div></div>`;
+  }
+  return `<div class="card"><div class="card-title">Campaign spend & cost per lead</div>
+    <p style="font-size:12.5px;color:var(--muted);margin:0 0 14px;">Enter what each campaign actually cost to run - the cost per lead and per conversion updates automatically.</p>
+    <div class="rep-row rep-head"><div>Campaign</div><div>Leads</div><div>Won</div><div>Spend (\u20B9)</div><div>Cost/lead</div><div>Cost/won</div><div></div></div>
+    ${s.byCampaign.map((c) => {
+      const entry = state.campaignSpend[c.campaign];
+      const spend = entry ? entry.spend : null;
+      const costPerLead = spend && c.total ? money(spend / c.total) : "\u2014";
+      const costPerWon = spend && c.won ? money(spend / c.won) : "\u2014";
+      return `<div class="rep-row rep-row-7col">
+        <div>${esc(c.campaign)}</div><div>${c.total}</div><div>${c.won}</div>
+        <div><input type="number" style="width:100px;padding:5px 8px;font-size:12px;" value="${spend || ""}" placeholder="0" onblur="updateCampaignSpend('${entry ? entry.id : ""}', this.value, '${esc(c.campaign).replace(/'/g, "\\'")}')" /></div>
+        <div>${costPerLead}</div><div>${costPerWon}</div><div></div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
 function duplicateLeadsHTML() {
   const groups = findDuplicateLeadGroups();
   if (groups.length === 0) return `<div class="card"><div class="card-title">Duplicate leads</div><div style="color:var(--muted);font-size:13px;">No duplicate phone numbers found - nothing to clean up.</div></div>`;
@@ -981,6 +1190,17 @@ async function deleteAssignmentRule(id) {
     render();
   } catch (e) { showToast(e.message); }
 }
+async function updateCampaignSpend(campaignId, value, campaignName) {
+  const spend = Number(value);
+  if (value !== "" && (isNaN(spend) || spend < 0)) { showToast("Enter a valid spend amount."); return; }
+  if (!campaignId) { showToast("Couldn't find that campaign - try refreshing the page."); return; }
+  try {
+    await api("/campaigns/" + campaignId, { method: "PATCH", body: JSON.stringify({ spend: value === "" ? 0 : spend }) });
+    showToast("Spend updated for " + campaignName);
+    state.campaignSpendLoaded = false;
+    render();
+  } catch (e) { showToast(e.message); }
+}
 async function resetPassword(id) {
   const pw = prompt("New temporary password for this user:");
   if (!pw) return;
@@ -1026,7 +1246,12 @@ function drawerHTML(l) {
             <option value="">Message templates\u2026</option>
             ${WHATSAPP_TEMPLATES.map((t, i) => `<option value="${i}">${esc(t.label)}</option>`).join("")}
           </select>` : ""}
-          ${l.email ? `<div style="font-size:12.5px;color:var(--muted);margin-top:8px;">${esc(l.email)}</div>` : ""}
+        </div>
+        <div class="two-col">
+          <div class="field-row"><label>Phone</label><input value="${esc(l.phone || "")}" placeholder="10-digit number" onblur="editLeadPhone('${l.id}', this.value)" />
+            <div id="edit_phone_warning_${l.id}"></div>
+          </div>
+          <div class="field-row"><label>Email</label><input value="${esc(l.email || "")}" placeholder="name@example.com" onblur="editLeadEmail('${l.id}', this.value)" /></div>
         </div>
         <div class="two-col">
           <div class="field-row"><label>Status</label><select onchange="updateLead('${l.id}', {status:this.value, disqualify_reason: this.value==='Disqualified' ? '${DISQUALIFY_REASONS[0]}' : null})">
@@ -1130,11 +1355,14 @@ async function bulkDeleteSelected() {
     await loadLeads();
   } catch (e) { showToast(e.message); }
 }
-async function submitComment(id) {
-  const text = document.getElementById("commentBox").value.trim();
-  if (!text) return;
-  try { await api("/leads/" + id + "/comments", { method: "POST", body: JSON.stringify({ text }) }); await loadLeads(); }
+async function submitCommentText(id, text) {
+  if (!text || !text.trim()) return;
+  try { await api("/leads/" + id + "/comments", { method: "POST", body: JSON.stringify({ text: text.trim() }) }); await loadLeads(); }
   catch (e) { showToast(e.message); }
+}
+async function submitComment(id) {
+  const box = document.getElementById("commentBox");
+  await submitCommentText(id, box ? box.value : "");
 }
 
 function sendWhatsAppTemplate(leadId, templateIndex) {
@@ -1171,7 +1399,7 @@ function doLogin() {
   login(u, p);
 }
 
-function setTab(t) { state.tab = t; state.quickFilter = null; render(); }
+function setTab(t) { state.tab = t; state.quickFilter = null; if (t === "callqueue") state.callQueueSkipped = new Set(); render(); }
 function setSearch(v) { state.filters.search = v; render(); }
 function setFilter(k, v) { state.filters[k] = v; state.quickFilter = null; state.activeSavedViewId = null; render(); }
 function toggleMoreFilters() { state.showMoreFilters = !state.showMoreFilters; render(); }
@@ -1213,12 +1441,15 @@ function closeLead() { state.selectedId = null; render(); }
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
 window.goToFilteredLeads = goToFilteredLeads; window.goToStatusFilter = goToStatusFilter; window.clearQuickFilter = clearQuickFilter;
 window.setSort = setSort; window.toggleMoreFilters = toggleMoreFilters; window.applySavedView = applySavedView; window.promptSaveView = promptSaveView; window.deleteSavedView = deleteSavedView;
+window.setLeadsView = setLeadsView; window.handleCardDrop = handleCardDrop;
+window.callQueueSaveAndNext = callQueueSaveAndNext; window.callQueueSkip = callQueueSkip;
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout; window.handleRowClick = handleRowClick;
 window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
+window.editLeadPhone = editLeadPhone; window.editLeadEmail = editLeadEmail;
 window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
 window.toggleLeadSelection = toggleLeadSelection; window.toggleSelectAllLeads = toggleSelectAllLeads; window.clearLeadSelection = clearLeadSelection; window.bulkDeleteSelected = bulkDeleteSelected;
 window.createUser = createUser; window.resetPassword = resetPassword; window.toggleActive = toggleActive; window.editUsername = editUsername; window.downloadAllLeads = downloadAllLeads; window.changeOwnPassword = changeOwnPassword;
-window.addAssignmentRule = addAssignmentRule; window.deleteAssignmentRule = deleteAssignmentRule;
+window.addAssignmentRule = addAssignmentRule; window.deleteAssignmentRule = deleteAssignmentRule; window.updateCampaignSpend = updateCampaignSpend;
 
 boot();
 </script>
