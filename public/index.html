@@ -71,6 +71,7 @@
   .filter-row select { width:auto; min-width:130px; }
   .dropzone { border:1.5px dashed var(--border); border-radius:12px; padding:34px; text-align:center; color:var(--muted); cursor:pointer; }
   .rep-row { display:grid; grid-template-columns: 1.4fr 0.7fr 0.7fr 0.7fr 0.9fr 1fr; gap:8px; padding:10px 4px; font-size:13px; border-bottom:1px solid var(--border); align-items:center; }
+  .rep-row.rep-row-7col { grid-template-columns: 1.2fr 0.6fr 0.6fr 0.6fr 0.8fr 0.9fr 0.9fr; }
   .rep-head { color:var(--muted); font-size:11px; text-transform:uppercase; }
   .table-scroll { overflow-x:auto; }
   .checkline { display:flex; align-items:center; gap:8px; font-size:13px; margin-bottom:8px; }
@@ -91,6 +92,7 @@
     .drawer { width:100%; max-width:100%; }
     .rep-row { grid-template-columns: 1fr 0.6fr 0.6fr 0.6fr; font-size:12px; }
     .rep-row > div:nth-child(5), .rep-row > div:nth-child(6) { display:none; }
+    .rep-row.rep-row-7col > div:nth-child(7) { display:none; }
   }
 </style>
 </head>
@@ -122,7 +124,13 @@ let state = {
   leads: [],
   tab: "dashboard",
   selectedId: null,
-  filters: { search: "", source: "All", status: "All" },
+  filters: { search: "", source: "All", status: "All", assignedTo: "All", campaign: "All", configuration: "All", leadType: "All", dateFrom: "", dateTo: "" }, // kept in sync with defaultFilters()
+  showMoreFilters: false,
+  sortField: "created_at",
+  sortDirection: "desc",
+  savedViews: [],
+  savedViewsLoaded: false,
+  activeSavedViewId: null,
   toast: null,
   users: [],
   campaigns: [],
@@ -138,6 +146,14 @@ let state = {
 };
 
 function money(n) { return "\u20B9" + Math.round(n || 0).toLocaleString("en-IN"); }
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) return "\u2014";
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return mins + "m";
+  const hours = mins / 60;
+  if (hours < 24) return (Math.round(hours * 10) / 10) + "h";
+  return (Math.round((hours / 24) * 10) / 10) + "d";
+}
 // Extra safety net on top of the CSS fix - very large crore-level figures
 // get a smaller font so they never risk pushing past the card's edge.
 function moneyValueHTML(n, cssClass) {
@@ -247,13 +263,21 @@ function computeStats(leads, team) {
   const bySource = SOURCES.map((s) => ({ name: s, value: leads.filter((l) => l.source === s).length })).filter((x) => x.value > 0);
   const byStatus = STATUSES.map((s) => ({ name: s, value: leads.filter((l) => l.status === s).length }));
   const repNames = Array.from(new Set(leads.map((l) => l.assigned_to_name).filter(Boolean)));
+  function avgFirstContactMs(list) {
+    const withContact = list.filter((l) => l.first_contacted_at);
+    if (withContact.length === 0) return null;
+    const totalMs = withContact.reduce((s, l) => s + (new Date(l.first_contacted_at) - new Date(l.created_at)), 0);
+    return totalMs / withContact.length;
+  }
   const byRep = repNames.map((rep) => {
     const mine = leads.filter((l) => l.assigned_to_name === rep);
     const won = mine.filter((l) => l.status === "Won").length;
     return { rep, total: mine.length, won, pending: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).length,
       conversion: mine.length ? Math.round((won / mine.length) * 100) : 0,
-      pipelineValue: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).reduce((s, l) => s + (l.deal_value || 0), 0) };
+      pipelineValue: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).reduce((s, l) => s + (l.deal_value || 0), 0),
+      avgFirstContactMs: avgFirstContactMs(mine) };
   });
+  const avgFirstContactOverallMs = avgFirstContactMs(leads);
   const disqualified = leads.filter((l) => l.status === "Disqualified");
   const byReason = DISQUALIFY_REASONS.map((r) => ({ reason: r, count: disqualified.filter((l) => (l.disqualify_reason || "Other") === r).length })).filter((x) => x.count > 0);
   const upcomingVisits = active.filter((l) => l.site_visit_status === "Scheduled" && l.site_visit_date).sort((a, b) => new Date(a.site_visit_date) - new Date(b.site_visit_date));
@@ -265,7 +289,7 @@ function computeStats(leads, team) {
       conversion: mine.length ? Math.round((won / mine.length) * 100) : 0,
       pipelineValue: mine.filter((l) => !CLOSED_STATUSES.includes(l.status)).reduce((s, l) => s + (l.deal_value || 0), 0) };
   }).sort((a, b) => b.total - a.total);
-  return { totalLeads: leads.length, newToday, pending, aging, wonThisMonth, pipelineValue, weightedValue, bySource, byStatus, byRep, disqualified, byReason, upcomingVisits, byCampaign, startOfToday };
+  return { totalLeads: leads.length, newToday, pending, aging, wonThisMonth, pipelineValue, weightedValue, bySource, byStatus, byRep, disqualified, byReason, upcomingVisits, byCampaign, avgFirstContactOverallMs, startOfToday };
 }
 
 function bars(data, labelKey, valueKey, color) {
@@ -321,19 +345,65 @@ function applyQuickFilter(l, mode, startOfToday) {
   if (mode === "pipeline") return !closed;
   return true;
 }
+function defaultFilters(overrides) {
+  return Object.assign({ search: "", source: "All", status: "All", assignedTo: "All", campaign: "All", configuration: "All", leadType: "All", dateFrom: "", dateTo: "" }, overrides || {});
+}
 function goToFilteredLeads(mode) {
   state.tab = "leads";
-  state.filters = { search: "", source: "All", status: "All" };
+  state.filters = defaultFilters();
   state.quickFilter = mode;
   render();
 }
 function goToStatusFilter(status) {
   state.tab = "leads";
-  state.filters = { search: "", source: "All", status };
+  state.filters = defaultFilters({ status });
   state.quickFilter = null;
   render();
 }
 function clearQuickFilter() { state.quickFilter = null; render(); }
+
+function matchesFilters(l, f) {
+  if (f.source !== "All" && l.source !== f.source) return false;
+  if (f.status !== "All" && l.status !== f.status) return false;
+  if (f.assignedTo && f.assignedTo !== "All" && String(l.assigned_to) !== String(f.assignedTo)) return false;
+  if (f.campaign && f.campaign !== "All" && l.campaign !== f.campaign) return false;
+  if (f.configuration && f.configuration !== "All" && l.configuration !== f.configuration) return false;
+  if (f.leadType && f.leadType !== "All" && l.lead_type !== f.leadType) return false;
+  if (f.dateFrom && new Date(l.created_at) < new Date(f.dateFrom)) return false;
+  if (f.dateTo && new Date(l.created_at) > new Date(f.dateTo + "T23:59:59")) return false;
+  if (f.search) { const s = f.search.toLowerCase(); if (!(`${l.name} ${l.phone} ${l.email}`.toLowerCase().includes(s))) return false; }
+  return true;
+}
+const SORTABLE_FIELDS = { name: "text", source: "text", status: "text", assigned_to_name: "text", follow_up_date: "date", created_at: "date" };
+function sortLeads(list) {
+  const field = state.sortField, dir = state.sortDirection, type = SORTABLE_FIELDS[field] || "text";
+  return list.slice().sort((a, b) => {
+    let av = a[field], bv = b[field];
+    const aEmpty = av === null || av === undefined || av === "";
+    const bEmpty = bv === null || bv === undefined || bv === "";
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;   // empty values always sort to the end, regardless of direction
+    if (bEmpty) return -1;
+    if (type === "date") { av = new Date(av).getTime(); bv = new Date(bv).getTime(); }
+    else { av = String(av).toLowerCase(); bv = String(bv).toLowerCase(); }
+    if (av < bv) return dir === "asc" ? -1 : 1;
+    if (av > bv) return dir === "asc" ? 1 : -1;
+    return 0;
+  });
+}
+function setSort(field) {
+  if (state.sortField === field) {
+    state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
+  } else {
+    state.sortField = field;
+    state.sortDirection = (field === "created_at" || field === "follow_up_date") ? "desc" : "asc";
+  }
+  render();
+}
+function sortIndicator(field) {
+  if (state.sortField !== field) return "";
+  return state.sortDirection === "asc" ? " \u25B2" : " \u25BC";
+}
 
 function render() {
   if (state.loading) { root.innerHTML = `<div style="padding:3rem;text-align:center;color:var(--muted)">Loading\u2026</div>`; return; }
@@ -341,12 +411,7 @@ function render() {
 
   const stats = computeStats(state.leads, []);
   state.stats = stats;
-  const filtered = state.leads.filter((l) => {
-    if (state.filters.source !== "All" && l.source !== state.filters.source) return false;
-    if (state.filters.status !== "All" && l.status !== state.filters.status) return false;
-    if (state.filters.search) { const s = state.filters.search.toLowerCase(); if (!(`${l.name} ${l.phone} ${l.email}`.toLowerCase().includes(s))) return false; }
-    return applyQuickFilter(l, state.quickFilter, stats.startOfToday);
-  }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const filtered = sortLeads(state.leads.filter((l) => matchesFilters(l, state.filters) && applyQuickFilter(l, state.quickFilter, stats.startOfToday)));
 
   const isAdmin = state.user.role === "admin" || state.user.role === "super_admin";
   const nav = [
@@ -401,6 +466,7 @@ function dashboardTab(s) {
       <div class="kpi-card clickable-card" onclick="goToFilteredLeads('aging')"><div class="kpi-label">Aging tasks</div><div class="kpi-value danger">${s.aging.length}</div></div>
       <div class="kpi-card clickable-card" onclick="goToFilteredLeads('wonMonth')"><div class="kpi-label">Won this month</div><div class="kpi-value teal">${s.wonThisMonth}</div></div>
       <div class="kpi-card clickable-card" onclick="goToFilteredLeads('pipeline')"><div class="kpi-label">Pipeline value</div>${moneyValueHTML(s.pipelineValue, "gold")}</div>
+      <div class="kpi-card"><div class="kpi-label">Avg. first contact</div><div class="kpi-value">${formatDuration(s.avgFirstContactOverallMs)}</div></div>
     </div>
     <div class="card"><div class="card-title">Pipeline by stage</div><div class="funnel">
       ${s.byStatus.map((st) => `<div class="funnel-seg clickable-card" style="background:${STATUS_STYLE[st.name].bg};color:${STATUS_STYLE[st.name].text};" onclick="goToStatusFilter('${st.name}')"><div class="funnel-count">${st.value}</div><div>${st.name}</div></div>`).join("")}
@@ -462,8 +528,12 @@ function myDayTab() {
 
 function leadsTab(filtered) {
   const isSuperAdmin = state.user.role === "super_admin";
+  const isAdminOrAbove = state.user.role === "admin" || isSuperAdmin;
   const selectedCount = state.selectedLeadIds.size;
   const allVisibleSelected = isSuperAdmin && filtered.length > 0 && filtered.every((l) => state.selectedLeadIds.has(l.id));
+  if (!state.savedViewsLoaded) {
+    api("/saved-views").then((d) => { state.savedViews = d.views; state.savedViewsLoaded = true; render(); }).catch(() => { state.savedViewsLoaded = true; });
+  }
   return `
     <h1 class="page-title">Leads</h1>
     <p class="page-sub">${filtered.length} of ${state.leads.length} leads shown</p>
@@ -471,10 +541,29 @@ function leadsTab(filtered) {
       <div style="font-size:13px;color:var(--gold);">Showing: ${esc(QUICK_FILTER_LABELS[state.quickFilter] || state.quickFilter)}</div>
       <button class="ghost" style="padding:5px 10px;font-size:12px;" onclick="clearQuickFilter()">Clear \u00d7</button>
     </div>` : ""}
+    <div class="filter-row" style="align-items:center;">
+      <select onchange="applySavedView(this.value)" style="width:auto;min-width:150px;">
+        <option value="">Saved views\u2026</option>
+        ${state.savedViews.map((v) => `<option value="${v.id}" ${state.activeSavedViewId === v.id ? "selected" : ""}>${esc(v.name)}</option>`).join("")}
+      </select>
+      <button class="ghost" onclick="promptSaveView()">+ Save current filters</button>
+      ${state.activeSavedViewId ? `<button class="ghost" onclick="deleteSavedView(${state.activeSavedViewId})">Delete this view</button>` : ""}
+    </div>
     <div class="filter-row">
       <select onchange="setFilter('source', this.value)"><option>All</option>${SOURCES.map((s) => `<option ${state.filters.source === s ? "selected" : ""}>${s}</option>`).join("")}</select>
       <select onchange="setFilter('status', this.value)"><option>All</option>${STATUSES.map((s) => `<option ${state.filters.status === s ? "selected" : ""}>${s}</option>`).join("")}</select>
+      ${isAdminOrAbove ? `<select onchange="setFilter('assignedTo', this.value)"><option value="All">All reps</option>${state.teamRoster.map((u) => `<option value="${u.id}" ${String(state.filters.assignedTo) === String(u.id) ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>` : ""}
+      <button class="ghost" onclick="toggleMoreFilters()">${state.showMoreFilters ? "Fewer filters \u25B2" : "More filters \u25BC"}</button>
     </div>
+    ${state.showMoreFilters ? `
+    <div class="filter-row">
+      <select onchange="setFilter('campaign', this.value)"><option value="All">All campaigns</option>${state.campaigns.map((c) => `<option ${state.filters.campaign === c ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+      <select onchange="setFilter('configuration', this.value)"><option value="All">All configurations</option>${CONFIGURATIONS.map((c) => `<option ${state.filters.configuration === c ? "selected" : ""}>${c}</option>`).join("")}</select>
+      <select onchange="setFilter('leadType', this.value)"><option value="All">All lead types</option>${LEAD_TYPES.map((t) => `<option ${state.filters.leadType === t ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <input type="date" style="width:auto;" value="${state.filters.dateFrom}" onchange="setFilter('dateFrom', this.value)" title="Created from" />
+      <span style="color:var(--muted);font-size:12px;align-self:center;">to</span>
+      <input type="date" style="width:auto;" value="${state.filters.dateTo}" onchange="setFilter('dateTo', this.value)" title="Created to" />
+    </div>` : ""}
     ${isSuperAdmin && selectedCount > 0 ? `
     <div class="card" style="padding:12px 16px;margin-bottom:12px;background:#3A1F22;border:1px solid var(--danger);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
       <div style="font-size:13.5px;color:#F08484;">${selectedCount} lead${selectedCount === 1 ? "" : "s"} selected</div>
@@ -486,7 +575,14 @@ function leadsTab(filtered) {
     <div class="card table-scroll" style="padding:0;">
       <table class="leads-table"><thead><tr>
         ${isSuperAdmin ? `<th><input type="checkbox" style="width:auto;" ${allVisibleSelected ? "checked" : ""} onchange="toggleSelectAllLeads(this.checked)" /></th>` : ""}
-        <th>Client</th><th>Contact</th><th>Source</th><th>Status</th><th>Assigned</th><th>Follow-up</th><th>Created</th><th></th></tr></thead>
+        <th style="cursor:pointer;" onclick="setSort('name')">Client${sortIndicator("name")}</th>
+        <th>Contact</th>
+        <th style="cursor:pointer;" onclick="setSort('source')">Source${sortIndicator("source")}</th>
+        <th style="cursor:pointer;" onclick="setSort('status')">Status${sortIndicator("status")}</th>
+        <th style="cursor:pointer;" onclick="setSort('assigned_to_name')">Assigned${sortIndicator("assigned_to_name")}</th>
+        <th style="cursor:pointer;" onclick="setSort('follow_up_date')">Follow-up${sortIndicator("follow_up_date")}</th>
+        <th style="cursor:pointer;" onclick="setSort('created_at')">Created${sortIndicator("created_at")}</th>
+        <th></th></tr></thead>
       <tbody>${filtered.map((l) => leadRow(l, state.user.role === "admin" || state.user.role === "super_admin", isSuperAdmin)).join("") || `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px;">No leads match these filters.</td></tr>`}</tbody></table>
     </div>
   `;
@@ -719,8 +815,8 @@ function reportsTab(s) {
     <h1 class="page-title">Management reports</h1>
     <p class="page-sub">Productivity, pipeline health and forecast</p>
     <div class="card"><div class="card-title">Team productivity</div>
-      <div class="rep-row rep-head"><div>Rep</div><div>Assigned</div><div>Pending</div><div>Won</div><div>Conversion</div><div>Open pipeline</div></div>
-      ${s.byRep.map((r) => `<div class="rep-row"><div>${esc(r.rep)}</div><div>${r.total}</div><div>${r.pending}</div><div>${r.won}</div><div>${r.conversion}%</div><div>${money(r.pipelineValue)}</div></div>`).join("")}
+      <div class="rep-row rep-row-7col rep-head"><div>Rep</div><div>Assigned</div><div>Pending</div><div>Won</div><div>Conversion</div><div>Open pipeline</div><div>Avg. first contact</div></div>
+      ${s.byRep.map((r) => `<div class="rep-row rep-row-7col"><div>${esc(r.rep)}</div><div>${r.total}</div><div>${r.pending}</div><div>${r.won}</div><div>${r.conversion}%</div><div>${money(r.pipelineValue)}</div><div>${formatDuration(r.avgFirstContactMs)}</div></div>`).join("")}
     </div>
     ${s.byCampaign.length > 0 ? `
     <div class="card"><div class="card-title">Leads by campaign</div>
@@ -1016,12 +1112,7 @@ function toggleLeadSelection(id, checked) {
   render();
 }
 function toggleSelectAllLeads(checked) {
-  const filtered = state.leads.filter((l) => {
-    if (state.filters.source !== "All" && l.source !== state.filters.source) return false;
-    if (state.filters.status !== "All" && l.status !== state.filters.status) return false;
-    if (state.filters.search) { const s = state.filters.search.toLowerCase(); if (!(`${l.name} ${l.phone} ${l.email}`.toLowerCase().includes(s))) return false; }
-    return true;
-  });
+  const filtered = state.leads.filter((l) => matchesFilters(l, state.filters));
   if (checked) filtered.forEach((l) => state.selectedLeadIds.add(l.id));
   else filtered.forEach((l) => state.selectedLeadIds.delete(l.id));
   render();
@@ -1082,12 +1173,46 @@ function doLogin() {
 
 function setTab(t) { state.tab = t; state.quickFilter = null; render(); }
 function setSearch(v) { state.filters.search = v; render(); }
-function setFilter(k, v) { state.filters[k] = v; state.quickFilter = null; render(); }
+function setFilter(k, v) { state.filters[k] = v; state.quickFilter = null; state.activeSavedViewId = null; render(); }
+function toggleMoreFilters() { state.showMoreFilters = !state.showMoreFilters; render(); }
+async function applySavedView(id) {
+  if (!id) { state.activeSavedViewId = null; render(); return; }
+  const view = state.savedViews.find((v) => String(v.id) === String(id));
+  if (!view) return;
+  state.filters = defaultFilters(view.filters.filters || {});
+  state.sortField = view.filters.sortField || "created_at";
+  state.sortDirection = view.filters.sortDirection || "desc";
+  state.quickFilter = null;
+  state.activeSavedViewId = Number(id);
+  render();
+}
+async function promptSaveView() {
+  const name = prompt("Name this view (e.g. \"My hot leads\"):");
+  if (!name || !name.trim()) return;
+  try {
+    const res = await api("/saved-views", { method: "POST", body: JSON.stringify({ name: name.trim(), filters: { filters: state.filters, sortField: state.sortField, sortDirection: state.sortDirection } }) });
+    showToast("View saved");
+    state.savedViewsLoaded = false;
+    state.activeSavedViewId = res.id;
+    render();
+  } catch (e) { showToast(e.message); }
+}
+async function deleteSavedView(id) {
+  if (!confirm("Delete this saved view?")) return;
+  try {
+    await api("/saved-views/" + id, { method: "DELETE" });
+    showToast("View deleted");
+    state.activeSavedViewId = null;
+    state.savedViewsLoaded = false;
+    render();
+  } catch (e) { showToast(e.message); }
+}
 function openLead(id) { state.selectedId = id; render(); }
 function closeLead() { state.selectedId = null; render(); }
 
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
 window.goToFilteredLeads = goToFilteredLeads; window.goToStatusFilter = goToStatusFilter; window.clearQuickFilter = clearQuickFilter;
+window.setSort = setSort; window.toggleMoreFilters = toggleMoreFilters; window.applySavedView = applySavedView; window.promptSaveView = promptSaveView; window.deleteSavedView = deleteSavedView;
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout; window.handleRowClick = handleRowClick;
 window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
 window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
