@@ -83,12 +83,12 @@
   .login-error { color: var(--danger); font-size:12.5px; margin-top:10px; }
   @media (max-width: 760px) {
     .app { flex-direction:column; }
-    .sidebar { width:100%; flex-direction:row; align-items:center; overflow-x:auto; padding:12px; gap:4px; }
-    .sidebar .brand { font-size:0; margin:0 8px 0 0; }
-    .sidebar .brand img.logo { width:26px; height:26px; }
-    .sidebar .brand-sub, .sidebar .sidebar-footer { display:none; }
-    .navitem { margin-bottom:0; white-space:nowrap; }
-    .content { padding:16px; }
+    .sidebar { position:fixed; bottom:0; left:0; right:0; top:auto; width:100%; flex-direction:row; align-items:center;
+      overflow-x:auto; padding:8px 8px calc(8px + env(safe-area-inset-bottom)); gap:2px; z-index:50;
+      border-top:1px solid var(--border); border-right:none; box-shadow:0 -4px 12px rgba(0,0,0,0.3); }
+    .sidebar .brand, .sidebar .brand-sub, .sidebar .sidebar-footer { display:none; }
+    .navitem { margin-bottom:0; white-space:nowrap; flex:1; text-align:center; justify-content:center; font-size:11.5px; padding:8px 6px; }
+    .content { padding:16px; padding-bottom:76px; }
     .drawer { width:100%; max-width:100%; }
     .rep-row { grid-template-columns: 1fr 0.6fr 0.6fr 0.6fr; font-size:12px; }
     .rep-row > div:nth-child(5), .rep-row > div:nth-child(6) { display:none; }
@@ -126,6 +126,7 @@ let state = {
   selectedId: null,
   filters: { search: "", source: "All", status: "All", assignedTo: "All", campaign: "All", configuration: "All", leadType: "All", dateFrom: "", dateTo: "" }, // kept in sync with defaultFilters()
   showMoreFilters: false,
+  addLeadShowMore: false,
   leadsView: "table",
   sortField: "created_at",
   sortDirection: "desc",
@@ -145,6 +146,8 @@ let state = {
   deletionLogLoaded: false,
   selectedLeadIds: new Set(),
   callQueueSkipped: new Set(),
+  showOnboarding: false,
+  onboardingStep: 0,
   quickFilter: null,
   loading: true,
 };
@@ -223,6 +226,9 @@ async function login(username, password) {
     const data = await api("/login", { method: "POST", body: JSON.stringify({ username, password }) });
     state.token = data.token; state.user = data.user;
     localStorage.setItem("ll_token", data.token);
+    if (localStorage.getItem("primark_onboarding_seen") !== "1") {
+      state.showOnboarding = true; state.onboardingStep = 0;
+    }
     await loadLeads();
   } catch (e) {
     state.loginError = e.message; render();
@@ -421,7 +427,7 @@ function render() {
 
   const isAdmin = state.user.role === "admin" || state.user.role === "super_admin";
   const nav = [
-    ["dashboard", "Dashboard"], ["myday", "My Day"], ["callqueue", "Call Queue"], ["leads", "Leads"], ["add", "Add lead"], ["import", "Import CSV"], ["reports", "Reports"],
+    ["dashboard", "Dashboard"], ["myday", "My Day"], ["callqueue", "Call Queue"], ["leads", "Leads"], ["import", "Import CSV"], ["reports", "Reports"],
   ];
   if (isAdmin) nav.push(["team", "Team"]);
 
@@ -456,16 +462,47 @@ function render() {
       </div>
     </div>
     ${state.selectedId ? drawerHTML(state.leads.find((l) => l.id === state.selectedId)) : ""}
+    ${state.showOnboarding ? onboardingHTML() : ""}
     ${state.toast ? `<div class="toast">${esc(state.toast)}</div>` : ""}
   `;
 }
 
 function dashboardTab(s) {
+  if (state.user.role === "rep") return dashboardRepView(s);
+  return dashboardAdminView(s);
+}
+
+function dashboardRepView(s) {
+  const myRank = s.leaderboard.findIndex((r) => r.rep === state.user.name);
+  const myEntry = myRank >= 0 ? s.leaderboard[myRank] : null;
+  return `
+    <h1 class="page-title">Hi ${esc(state.user.name.split(" ")[0])}</h1>
+    <p class="page-sub">Here's what's on your plate today</p>
+    ${dashboardTipsHTML()}
+    <div class="kpi-grid">
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('pending')"><div class="kpi-label">Pending follow-ups</div><div class="kpi-value teal">${s.pending}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('aging')"><div class="kpi-label">Aging tasks</div><div class="kpi-value danger">${s.aging.length}</div></div>
+      <div class="kpi-card clickable-card" onclick="goToFilteredLeads('newToday')"><div class="kpi-label">New today</div><div class="kpi-value gold">${s.newToday}</div></div>
+    </div>
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg, var(--surface) 0%, var(--surface-raised) 100%);">
+      <div style="font-size:14px;font-weight:600;">Ready to start?</div>
+      <div style="display:flex;gap:10px;">
+        <button class="ghost" onclick="setTab('myday')">View My Day</button>
+        <button class="primary" onclick="setTab('callqueue')">Go to Call Queue \u2192</button>
+      </div>
+    </div>
+    ${myEntry ? `
+    <div class="card"><div class="card-title">\uD83C\uDFC6 Your standing this month</div>
+      <div style="font-size:13.5px;">${myRank === 0 ? "You're in 1st place" : myRank === 1 ? "You're in 2nd place" : myRank === 2 ? "You're in 3rd place" : `You're ranked #${myRank + 1}`} with <strong style="color:var(--gold);">${myEntry.wonThisMonth} won</strong> this month and a ${myEntry.conversion}% conversion rate.</div>
+    </div>` : ""}
+  `;
+}
+
+function dashboardAdminView(s) {
   return `
     <h1 class="page-title">Dashboard</h1>
     <p class="page-sub">Live snapshot across Instagram, Facebook, Google Ads and manual sources</p>
-    ${a2hsBannerHTML()}
-    ${state.user.role === "super_admin" ? backupReminderHTML() : ""}
+    ${dashboardTipsHTML()}
     <div class="kpi-grid">
       <div class="kpi-card clickable-card" onclick="goToFilteredLeads(null)"><div class="kpi-label">Total leads</div><div class="kpi-value">${s.totalLeads}</div></div>
       <div class="kpi-card clickable-card" onclick="goToFilteredLeads('newToday')"><div class="kpi-label">New today</div><div class="kpi-value gold">${s.newToday}</div></div>
@@ -599,6 +636,14 @@ function myDayTab() {
     <h1 class="page-title">My Day</h1>
     <p class="page-sub">Everything due today, in one place - nothing to hunt for in the full leads list</p>
     ${nothing ? `<div class="card"><div style="color:var(--muted);font-size:14px;">Nothing due today. Enjoy the breathing room.</div></div>` : ""}
+    ${dueFollowUps.length > 0 ? `
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;background:linear-gradient(135deg, var(--surface) 0%, var(--surface-raised) 100%);">
+      <div>
+        <div style="font-size:14px;font-weight:600;">${dueFollowUps.length} follow-up${dueFollowUps.length === 1 ? "" : "s"} ready to work through</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Call Queue walks you through them one at a time, most overdue first.</div>
+      </div>
+      <button class="primary" onclick="setTab('callqueue')">Start working these \u2192</button>
+    </div>` : ""}
     ${visitsToday.length > 0 ? `
       <div class="card"><div class="card-title">Site visits today</div>
         <div class="table-scroll"><table class="leads-table"><thead><tr><th>Client</th><th>Property</th><th>Contact</th><th>Assigned</th><th></th></tr></thead><tbody>
@@ -750,17 +795,17 @@ function addLeadTab() {
         </div>
         <div class="field-row"><label>Email ID</label><input id="f_email" placeholder="name@example.com" /></div>
       </div>
+      <div class="field-row"><label>Source of lead</label><select id="f_source">${SOURCES.map((s) => `<option>${s}</option>`).join("")}</select></div>
+      <button class="ghost" style="margin-bottom:16px;" onclick="toggleAddLeadMore()">${state.addLeadShowMore ? "\u2212 Fewer details" : "+ Add more details (property, budget, follow-up\u2026)"}</button>
+      ${state.addLeadShowMore ? `
       <div class="two-col">
-        <div class="field-row"><label>Source of lead</label><select id="f_source">${SOURCES.map((s) => `<option>${s}</option>`).join("")}</select></div>
         <div class="field-row"><label>Campaign (optional)</label><input id="f_campaign" list="campaign_list" placeholder="e.g. Diwali Offer 2026" />
           <datalist id="campaign_list">${state.campaigns.map((c) => `<option value="${esc(c)}">`).join("")}</datalist>
         </div>
-      </div>
-      <div class="two-col">
         <div class="field-row"><label>Lead type</label><select id="f_lead_type">${LEAD_TYPES.map((s) => `<option>${s}</option>`).join("")}</select></div>
-        <div class="field-row"><label>Property / project interested in</label><input id="f_property" placeholder="e.g. Palm Meadows Phase 2" /></div>
       </div>
       <div class="two-col">
+        <div class="field-row"><label>Property / project interested in</label><input id="f_property" placeholder="e.g. Palm Meadows Phase 2" /></div>
         <div class="field-row"><label>Configuration</label><select id="f_config">${CONFIGURATIONS.map((s) => `<option>${s}</option>`).join("")}</select></div>
       </div>
       <div class="two-col">
@@ -773,6 +818,11 @@ function addLeadTab() {
       </div>
       <div class="field-row"><label>Follow-up date</label><input id="f_followup" type="date" /></div>
       <div class="field-row"><label>Initial note (optional)</label><textarea id="f_note" rows="2"></textarea></div>
+      ` : `
+      <input id="f_campaign" type="hidden" /><input id="f_lead_type" type="hidden" value="Buyer" /><input id="f_property" type="hidden" />
+      <input id="f_config" type="hidden" /><input id="f_budget_min" type="hidden" /><input id="f_budget_max" type="hidden" />
+      <input id="f_location" type="hidden" /><input id="f_channel" type="hidden" /><input id="f_followup" type="hidden" /><textarea id="f_note" style="display:none;"></textarea>
+      `}
       <button class="primary" onclick="submitAddLead()">Save lead</button>
     </div>
   `;
@@ -964,18 +1014,19 @@ async function confirmCsvImport() {
   } catch (e) { showToast(e.message); }
 }
 
-function a2hsBannerHTML() {
+function a2hsTipRow() {
   const isMobile = window.innerWidth <= 760;
   const dismissed = localStorage.getItem("primark_a2hs_dismissed") === "1";
   if (!isMobile || dismissed) return "";
-  return `<div class="card" style="padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-    <div style="font-size:12.5px;color:var(--text);">\uD83D\uDCF1 Tip: add this to your home screen for one-tap access \u2014 open your browser menu and choose "Add to Home Screen".</div>
+  return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+    <div style="font-size:12.5px;color:var(--text);">\uD83D\uDCF1 Add this to your home screen for one-tap access \u2014 open your browser menu and choose "Add to Home Screen".</div>
     <button class="ghost" onclick="dismissA2HSTip()">Got it</button>
   </div>`;
 }
 function dismissA2HSTip() { localStorage.setItem("primark_a2hs_dismissed", "1"); render(); }
 
-function backupReminderHTML() {
+function backupReminderRow() {
+  if (state.user.role !== "super_admin") return "";
   if (!state.backupChecked) {
     api("/settings/last-backup").then((d) => { state.lastBackupAt = d.lastBackupAt; state.backupChecked = true; render(); }).catch(() => { state.backupChecked = true; });
     return "";
@@ -983,11 +1034,52 @@ function backupReminderHTML() {
   const days = state.lastBackupAt ? Math.floor((Date.now() - new Date(state.lastBackupAt).getTime()) / 86400000) : null;
   const overdue = days === null || days >= 7;
   if (!overdue) return "";
-  return `<div class="card" style="padding:14px 16px;margin-bottom:16px;background:#3A2A1F;border:1px solid #6B4A2A;">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-      <div style="color:#F0A868;font-size:13.5px;">\u26A0 ${days === null ? "No backup has been taken yet." : `Last backup was ${days} day${days === 1 ? "" : "s"} ago.`} Download a copy so your data is never only in one place.</div>
-      <button class="ghost" onclick="setTab('reports')">Go to Reports \u2192</button>
+  return `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+    <div style="color:#F0A868;font-size:13.5px;">\u26A0 ${days === null ? "No backup has been taken yet." : `Last backup was ${days} day${days === 1 ? "" : "s"} ago.`} Download a copy so your data is never only in one place.</div>
+    <button class="ghost" onclick="setTab('reports')">Go to Reports \u2192</button>
+  </div>`;
+}
+const ONBOARDING_SLIDES = [
+  { emoji: "\uD83D\uDC4B", title: "Welcome to Primark Realtors CRM", body: "A quick, 30-second look around before you dive in - four short stops, then you're on your own." },
+  { emoji: "\u2600\uFE0F", title: "My Day & Call Queue", body: "My Day shows everything due today in one place. Call Queue then walks you through those leads one at a time, most overdue first - so you never have to think about who's next." },
+  { emoji: "\uD83D\uDCDE", title: "One-tap contact, everywhere", body: "Call, WhatsApp, and Email buttons sit right next to every lead - no retyping a number, ever. WhatsApp even has pre-written message templates ready to go." },
+  { emoji: "\uD83D\uDEE0\uFE0F", title: "Nothing is ever lost", body: "Every status change and comment is recorded automatically in a lead's activity log. Day-to-day questions - ask your admin. You're ready - let's go." },
+];
+function onboardingHTML() {
+  const step = state.onboardingStep;
+  const slide = ONBOARDING_SLIDES[step];
+  const isLast = step === ONBOARDING_SLIDES.length - 1;
+  return `<div class="drawer-backdrop" style="justify-content:center;align-items:center;">
+    <div class="card" style="max-width:440px;text-align:center;padding:32px 28px;">
+      <div style="font-size:40px;margin-bottom:12px;">${slide.emoji}</div>
+      <h2 style="margin:0 0 10px;font-family:Georgia,serif;font-size:19px;">${esc(slide.title)}</h2>
+      <p style="font-size:13.5px;color:var(--muted);line-height:1.5;margin:0 0 22px;">${esc(slide.body)}</p>
+      <div style="display:flex;justify-content:center;gap:6px;margin-bottom:20px;">
+        ${ONBOARDING_SLIDES.map((_, i) => `<div style="width:7px;height:7px;border-radius:50%;background:${i === step ? "var(--gold)" : "var(--border)"};"></div>`).join("")}
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:10px;">
+        <button class="ghost" onclick="onboardingSkip()">Skip</button>
+        <button class="primary" onclick="onboardingNext()">${isLast ? "Let's go" : "Next"}</button>
+      </div>
     </div>
+  </div>`;
+}
+function onboardingNext() {
+  if (state.onboardingStep >= ONBOARDING_SLIDES.length - 1) { onboardingSkip(); return; }
+  state.onboardingStep++;
+  render();
+}
+function onboardingSkip() {
+  localStorage.setItem("primark_onboarding_seen", "1");
+  state.showOnboarding = false;
+  render();
+}
+
+function dashboardTipsHTML() {
+  const rows = [a2hsTipRow(), backupReminderRow()].filter(Boolean);
+  if (rows.length === 0) return "";
+  return `<div class="card" style="padding:14px 16px;margin-bottom:16px;background:#241B14;border:1px solid var(--border);">
+    ${rows.map((r, i) => `<div style="${i < rows.length - 1 ? "margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border);" : ""}">${r}</div>`).join("")}
   </div>`;
 }
 
@@ -1403,6 +1495,13 @@ function setTab(t) { state.tab = t; state.quickFilter = null; if (t === "callque
 function setSearch(v) { state.filters.search = v; render(); }
 function setFilter(k, v) { state.filters[k] = v; state.quickFilter = null; state.activeSavedViewId = null; render(); }
 function toggleMoreFilters() { state.showMoreFilters = !state.showMoreFilters; render(); }
+function toggleAddLeadMore() {
+  const preserve = {};
+  ["f_name", "f_phone", "f_email", "f_source"].forEach((id) => { const el = document.getElementById(id); if (el) preserve[id] = el.value; });
+  state.addLeadShowMore = !state.addLeadShowMore;
+  render();
+  Object.keys(preserve).forEach((id) => { const el = document.getElementById(id); if (el) el.value = preserve[id]; });
+}
 async function applySavedView(id) {
   if (!id) { state.activeSavedViewId = null; render(); return; }
   const view = state.savedViews.find((v) => String(v.id) === String(id));
@@ -1441,10 +1540,11 @@ function closeLead() { state.selectedId = null; render(); }
 window.setTab = setTab; window.setSearch = setSearch; window.setFilter = setFilter;
 window.goToFilteredLeads = goToFilteredLeads; window.goToStatusFilter = goToStatusFilter; window.clearQuickFilter = clearQuickFilter;
 window.setSort = setSort; window.toggleMoreFilters = toggleMoreFilters; window.applySavedView = applySavedView; window.promptSaveView = promptSaveView; window.deleteSavedView = deleteSavedView;
+window.onboardingNext = onboardingNext; window.onboardingSkip = onboardingSkip;
 window.setLeadsView = setLeadsView; window.handleCardDrop = handleCardDrop;
 window.callQueueSaveAndNext = callQueueSaveAndNext; window.callQueueSkip = callQueueSkip;
 window.openLead = openLead; window.closeLead = closeLead; window.doLogin = doLogin; window.logout = logout; window.handleRowClick = handleRowClick;
-window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton;
+window.submitAddLead = submitAddLead; window.handleCsv = handleCsv; window.confirmCsvImport = confirmCsvImport; window.checkPhoneDuplicate = checkPhoneDuplicate; window.downloadCsvTemplate = downloadCsvTemplate; window.updateCsvImportButton = updateCsvImportButton; window.toggleAddLeadMore = toggleAddLeadMore;
 window.editLeadPhone = editLeadPhone; window.editLeadEmail = editLeadEmail;
 window.updateLead = updateLead; window.reassignLead = reassignLead; window.deleteLead = deleteLead; window.submitComment = submitComment; window.sendWhatsAppTemplate = sendWhatsAppTemplate; window.dismissA2HSTip = dismissA2HSTip;
 window.toggleLeadSelection = toggleLeadSelection; window.toggleSelectAllLeads = toggleSelectAllLeads; window.clearLeadSelection = clearLeadSelection; window.bulkDeleteSelected = bulkDeleteSelected;
