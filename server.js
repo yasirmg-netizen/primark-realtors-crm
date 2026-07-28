@@ -114,7 +114,10 @@ app.patch("/api/users/:id", requireAuth, requireRole("admin", "super_admin"), ah
 app.get("/api/leads/check-duplicate", requireAuth, ah(async (req, res) => {
   const phone = normalizePhone(req.query.phone).replace(/^\+?91/, "");
   if (!phone || phone.length < 10) return res.json({ duplicate: false });
-  const rows = await db.all("SELECT leads.name, leads.status, leads.created_at, leads.assigned_to, users.name as assigned_to_name FROM leads LEFT JOIN users ON users.id = leads.assigned_to WHERE leads.phone LIKE ?", [`%${phone}%`]);
+  const excludeId = req.query.excludeId || null;
+  const rows = excludeId
+    ? await db.all("SELECT leads.name, leads.status, leads.created_at, leads.assigned_to, users.name as assigned_to_name FROM leads LEFT JOIN users ON users.id = leads.assigned_to WHERE leads.phone LIKE ? AND leads.id != ?", [`%${phone}%`, excludeId])
+    : await db.all("SELECT leads.name, leads.status, leads.created_at, leads.assigned_to, users.name as assigned_to_name FROM leads LEFT JOIN users ON users.id = leads.assigned_to WHERE leads.phone LIKE ?", [`%${phone}%`]);
   if (rows.length === 0) return res.json({ duplicate: false });
   const l = rows[0];
   res.json({ duplicate: true, name: l.name, status: l.status, createdAt: l.created_at, assignedToName: l.assigned_to_name || "Unassigned" });
@@ -163,6 +166,21 @@ async function upsertCampaign(name) {
 app.get("/api/campaigns", requireAuth, ah(async (req, res) => {
   const rows = await db.all("SELECT name FROM campaigns ORDER BY name");
   res.json({ campaigns: rows.map((r) => r.name) });
+}));
+
+// Separate from the plain name list above (used for autocomplete everywhere)
+// - this one carries spend, for the cost-per-lead report, and is only ever
+// fetched by admins/super admins from the Reports screen.
+app.get("/api/campaigns/spend", requireAuth, requireRole("admin", "super_admin"), ah(async (req, res) => {
+  const rows = await db.all("SELECT id, name, spend FROM campaigns ORDER BY name");
+  res.json({ campaigns: rows });
+}));
+
+app.patch("/api/campaigns/:id", requireAuth, requireRole("admin", "super_admin"), ah(async (req, res) => {
+  const spend = Number(req.body && req.body.spend);
+  if (isNaN(spend) || spend < 0) return res.status(400).json({ error: "Enter a valid spend amount." });
+  await db.run("UPDATE campaigns SET spend = ? WHERE id = ?", [spend, req.params.id]);
+  res.json({ ok: true });
 }));
 
 // Saved views are personal - each user only ever sees their own, regardless

@@ -127,6 +127,7 @@ async function init() {
   // once a column already exists.
   await ensureColumn("leads", "campaign", "TEXT");
   await ensureColumn("leads", "first_contacted_at", "TEXT");
+  await ensureColumn("campaigns", "spend", "REAL");
 
   const countRow = await get("SELECT COUNT(*) as c FROM users");
   if (countRow.c === 0) {
