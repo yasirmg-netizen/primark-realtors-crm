@@ -165,6 +165,29 @@ app.get("/api/campaigns", requireAuth, ah(async (req, res) => {
   res.json({ campaigns: rows.map((r) => r.name) });
 }));
 
+// Saved views are personal - each user only ever sees their own, regardless
+// of role, since a filter combination one rep finds useful may not make
+// sense for another.
+app.get("/api/saved-views", requireAuth, ah(async (req, res) => {
+  const rows = await db.all("SELECT id, name, filters_json FROM saved_views WHERE user_id = ? ORDER BY created_at", [req.user.id]);
+  res.json({ views: rows.map((r) => ({ id: r.id, name: r.name, filters: JSON.parse(r.filters_json) })) });
+}));
+
+app.post("/api/saved-views", requireAuth, ah(async (req, res) => {
+  const { name, filters } = req.body || {};
+  if (!name || !filters) return res.status(400).json({ error: "A name and the current filters are both required." });
+  const info = await db.run(
+    "INSERT INTO saved_views (user_id, name, filters_json, created_at) VALUES (?, ?, ?, ?)",
+    [req.user.id, name.trim(), JSON.stringify(filters), nowISO()]
+  );
+  res.json({ id: Number(info.lastInsertRowid) });
+}));
+
+app.delete("/api/saved-views/:id", requireAuth, ah(async (req, res) => {
+  await db.run("DELETE FROM saved_views WHERE id = ? AND user_id = ?", [req.params.id, req.user.id]);
+  res.json({ ok: true });
+}));
+
 app.post("/api/leads", requireAuth, ah(async (req, res) => {
   const body = req.body || {};
   if (!isValidPhone(body.phone)) return res.status(400).json({ error: "That phone number doesn't look right - use a 10-digit number." });
@@ -247,6 +270,14 @@ app.patch("/api/leads/:id", requireAuth, ah(async (req, res) => {
     args.push(newVal);
   }
   if (sets.length === 0) return res.json({ ok: true });
+  // Automatically capture the moment a lead is first acted on - the first
+  // time its status moves away from "New" - as a response-time metric.
+  // This is server-controlled only; it's never something a client can set
+  // directly, and it's only ever written once per lead.
+  if (Object.prototype.hasOwnProperty.call(body, "status") && lead.status === "New" && body.status !== "New" && !lead.first_contacted_at) {
+    sets.push("first_contacted_at = ?");
+    args.push(nowISO());
+  }
   sets.push("updated_at = ?");
   args.push(nowISO());
   args.push(lead.id);

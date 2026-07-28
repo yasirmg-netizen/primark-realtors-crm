@@ -99,6 +99,13 @@ const SCHEMA = [
     assigned_to INTEGER NOT NULL REFERENCES users(id),
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS saved_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    filters_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
 ];
 
 // Adds a column if an already-existing database doesn't have it yet.
@@ -119,6 +126,7 @@ async function init() {
   // Forward-compatible migrations - safe to run every startup, does nothing
   // once a column already exists.
   await ensureColumn("leads", "campaign", "TEXT");
+  await ensureColumn("leads", "first_contacted_at", "TEXT");
 
   const countRow = await get("SELECT COUNT(*) as c FROM users");
   if (countRow.c === 0) {
